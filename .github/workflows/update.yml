@@ -1,0 +1,92 @@
+name: Update r2u Downloads
+
+on:
+  schedule:
+    # Daily, before the r-observatory/data merge (~08:00 UTC). Most runs are
+    # cheap no-ops: the source repo only publishes ~once a month, so a run only
+    # rebuilds shards when a source file's blob SHA actually changed.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: r2u-downloads-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::RSQLite
+            any::jsonlite
+            any::testthat
+            any::DBI
+            any::duckdb
+            any::withr
+
+      - name: Run unit tests
+        run: Rscript tests/testthat.R
+
+      - name: Run update script
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p out
+          Rscript scripts/update.R out/
+
+      - name: Publish changed shards to "current" release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view current >/dev/null 2>&1; then
+            git tag -f current
+            git push -f origin current || true
+            gh release create current \
+              --title "r2u Downloads (rolling)" \
+              --notes "Latest shards. See manifest.json for what changed in the most recent run." \
+              --latest
+          fi
+
+          # Upload each changed data shard first...
+          CHANGED=$(jq -r '.changed_shards[]' out/manifest.json)
+          for asset in $CHANGED; do
+            if [ -f "out/$asset" ]; then
+              echo "Uploading $asset..."
+              gh release upload current "out/$asset" --clobber
+            else
+              echo "WARNING: $asset listed in manifest but not present on disk"
+            fi
+          done
+
+          # ...then manifest.json LAST, so a crash before this point leaves the
+          # prior manifest authoritative and the next run safely re-derives.
+          gh release upload current out/manifest.json --clobber
+
+      - name: Update last run timestamp
+        continue-on-error: true
+        run: |
+          echo "Last updated: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" > last-updated.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last-updated.txt
+          git diff --cached --quiet || git commit -m "chore: update last run time"
+          git pull --rebase || true
+          git push
