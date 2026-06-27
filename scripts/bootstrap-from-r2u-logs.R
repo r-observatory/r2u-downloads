@@ -32,15 +32,10 @@ source(file.path(.script_dir, "update.R"))
 args    <- commandArgs(trailingOnly = TRUE)
 out_dir <- if (length(args) >= 1) args[1] else "out"
 
-# Force a cold start: ignore any prior manifest on the release.
+# Force a cold start: ignore any prior manifest/shards on the release.
 unlink(file.path(out_dir, "manifest.json"))
 io <- default_io()
-io$release_download <- function(pattern, dir) {
-  if (identical(pattern, "manifest.json")) return(1L)  # pretend no prior manifest
-  # year shards: still allow download (window assembly) — but on a true cold
-  # start none exist yet, so this returns non-zero and is skipped.
-  default_io()$release_download(pattern, dir)
-}
+io$release_exists <- function() FALSE  # treat as a fresh release -> full rebuild
 
 # Optional year filter for a cheap live smoke.
 only <- Sys.getenv("R2U_ONLY_YEARS", "")

@@ -117,7 +117,8 @@ embed_summary <- function(recent_path, summary_df) {
 #' Run one update cycle.
 #'
 #' @param io  list of IO functions:
-#'   release_download(pattern, dir) -> int status (0 = downloaded)
+#'   release_exists() -> logical (does the rolling `current` release exist?)
+#'   release_download(pattern, dir) -> int status (0 = downloaded, non-zero = absent/failed)
 #'   contents() -> named list path -> list(sha, size)  (current source files)
 #'   head_sha() -> character(1)
 #'   fetch_sources(paths, dir) -> named character (source path -> local file)
@@ -129,8 +130,17 @@ run_update <- function(io, out_dir) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   manifest_path <- file.path(out_dir, "manifest.json")
 
-  # 1. Prior manifest (persistent state).
-  io$release_download("manifest.json", out_dir)
+  # 1. Prior manifest (persistent state). Only treat a MISSING manifest as a
+  #    cold start when the release genuinely does not exist yet; if the release
+  #    exists but the download fails, abort rather than silently full-rebuilding.
+  rel_exists <- io$release_exists()
+  if (rel_exists) {
+    st <- io$release_download("manifest.json", out_dir)
+    if (!identical(st, 0L) || !file.exists(manifest_path)) {
+      stop("release 'current' exists but manifest.json could not be downloaded; ",
+           "aborting so the prior state stays authoritative")
+    }
+  }
   prev <- if (file.exists(manifest_path)) {
     jsonlite::fromJSON(manifest_path, simplifyVector = FALSE)
   } else {
@@ -176,14 +186,26 @@ run_update <- function(io, out_dir) {
 
   # 6-7. Rebuild each affected year from source (filter rows to that year).
   for (yr in ay) {
+    shard <- sprintf("r2u-%04d.db", yr)
     fpaths <- files_for_year(curr_paths, yr)
-    if (length(fpaths) == 0) next
+
+    # Year fully deleted upstream: publish an empty shard so the release no
+    # longer serves stale rows for it.
+    if (length(fpaths) == 0) {
+      empty <- data.frame(package = character(0), date = character(0),
+                          repo = character(0), dist = character(0),
+                          arch = character(0), count = integer(0))
+      export_shard(file.path(out_dir, shard), empty)
+      changed_shards <- c(changed_shards, shard)
+      shard_updates[[shard]] <- coverage(empty)
+      next
+    }
+
     local <- io$fetch_sources(fpaths, src_dir)
     agg <- aggregate_files(unname(local))
     source_rows_read <- source_rows_read + (attr(agg, "source_rows") %||% 0L)
     yr_rows <- agg[substr(agg$date, 1, 4) == sprintf("%04d", yr), , drop = FALSE]
 
-    shard <- sprintf("r2u-%04d.db", yr)
     export_shard(file.path(out_dir, shard), yr_rows)
     changed_shards <- c(changed_shards, shard)
     shard_updates[[shard]] <- coverage(yr_rows)
@@ -203,9 +225,19 @@ run_update <- function(io, out_dir) {
   if (!is.na(anchor) && length(intersect(ay, wy)) > 0) {
     for (w in setdiff(wy, ay)) {
       shard <- sprintf("r2u-%04d.db", w)
-      io$release_download(shard, out_dir)
+      st <- io$release_download(shard, out_dir)
       sp <- file.path(out_dir, shard)
-      if (file.exists(sp)) load_shard(con_work, sp)
+      if (file.exists(sp)) {
+        load_shard(con_work, sp)
+      } else if (!is.null(prev_shards[[shard]])) {
+        # The prior manifest says this shard exists, so a missing file here is a
+        # failed download, not a genuinely-absent shard. Abort: otherwise we
+        # would publish a recent.db/summary.db missing a whole window-year and
+        # clobber the correct assets.
+        stop("window-year shard ", shard, " is expected on the release ",
+             "(status ", st, ") but could not be downloaded; aborting")
+      }
+      # else: genuinely absent (e.g. a year with no data on a fresh release) -> skip
     }
 
     recent_rows <- extract_recent_rows(con_work, anchor, RECENT_WINDOW)
@@ -253,6 +285,24 @@ with_retry <- function(expr, tries = 3L, wait = 3) {
   stop(val)
 }
 
+# Run gh and capture stdout, RAISING on a non-zero exit (system2(stdout=TRUE)
+# otherwise only attaches a "status" attribute, so a bare call would never let
+# with_retry see a failure). Use for the read calls that gate the whole run.
+gh_capture <- function(args) {
+  out <- suppressWarnings(system2("gh", args, stdout = TRUE, stderr = TRUE))
+  st  <- attr(out, "status") %||% 0L
+  if (!identical(as.integer(st), 0L)) {
+    stop("gh ", paste(args[1:2], collapse = " "), " failed (status ", st, "): ",
+         paste(utils::head(out, 5), collapse = " "))
+  }
+  out
+}
+
+# Best-effort canonical-case map, CRAN only (lowercased token -> canonical).
+# Bioconductor names are not included, so r-bioc- packages fall back to their
+# lowercased token in name_display — acceptable since name_display is a non-key,
+# display-only field (see the spec's name-casing decision). Lowercase collisions
+# (which CRAN forbids) resolve to the lexicographically first canonical name.
 build_name_map <- function(cran_repo = "https://cloud.r-project.org") {
   canon <- tryCatch(rownames(available.packages(repos = cran_repo)),
                     error = function(e) character(0))
@@ -263,18 +313,30 @@ build_name_map <- function(cran_repo = "https://cloud.r-project.org") {
 
 default_io <- function() {
   list(
-    release_download = function(pattern, dir) {
+    release_exists = function() {
       st <- suppressWarnings(system2("gh",
-        c("release", "download", "current", "--repo", PUBLISH_REPO,
-          "--pattern", pattern, "--dir", dir, "--clobber"),
-        stdout = TRUE, stderr = TRUE))
-      attr(st, "status") %||% 0L
+        c("release", "view", "current", "--repo", PUBLISH_REPO),
+        stdout = FALSE, stderr = FALSE))
+      identical(as.integer(st), 0L)
+    },
+    release_download = function(pattern, dir) {
+      # Retry transient failures; a genuinely-absent asset stays non-zero and the
+      # caller decides whether that is acceptable (cold release) or fatal.
+      for (i in seq_len(3L)) {
+        st <- suppressWarnings(system2("gh",
+          c("release", "download", "current", "--repo", PUBLISH_REPO,
+            "--pattern", pattern, "--dir", dir, "--clobber"),
+          stdout = TRUE, stderr = TRUE))
+        code <- as.integer(attr(st, "status") %||% 0L)
+        if (identical(code, 0L)) return(0L)
+        if (i < 3L) Sys.sleep(3 * i)
+      }
+      code
     },
     contents = function() {
       fetch_dir <- function(d) {
-        txt <- with_retry(system2("gh",
-          c("api", sprintf("repos/%s/contents/%s", SOURCE_REPO, d), "--paginate"),
-          stdout = TRUE, stderr = TRUE))
+        txt <- with_retry(gh_capture(
+          c("api", sprintf("repos/%s/contents/%s", SOURCE_REPO, d), "--paginate")))
         js <- jsonlite::fromJSON(paste(txt, collapse = "\n"), simplifyVector = FALSE)
         out <- list()
         for (it in js) {
@@ -287,9 +349,9 @@ default_io <- function() {
       c(fetch_dir("r2u"), fetch_dir("rob"))
     },
     head_sha = function() {
-      trimws(paste(with_retry(system2("gh",
-        c("api", sprintf("repos/%s/commits/master", SOURCE_REPO), "--jq", ".sha"),
-        stdout = TRUE, stderr = TRUE)), collapse = ""))
+      trimws(paste(with_retry(gh_capture(
+        c("api", sprintf("repos/%s/commits/master", SOURCE_REPO), "--jq", ".sha"))),
+        collapse = ""))
     },
     fetch_sources = function(paths, dir) {
       stats::setNames(vapply(paths, function(p) {

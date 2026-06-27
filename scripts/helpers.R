@@ -60,22 +60,45 @@ window_years <- function(anchor_date, window_days = 400L) {
 files_for_year <- function(all_files, year) {
   parsed <- lapply(all_files, parse_period)
 
+  physical_months <- function(p) {
+    if (p$period_type == "year") 1:12
+    else if (p$period_type == "quarter") {
+      q <- as.integer(substr(p$period, 2, 2)); ((q - 1) * 3 + 1):((q - 1) * 3 + 3)
+    } else as.integer(p$period)
+  }
+
   pick_for_host <- function(host) {
     fs  <- Filter(function(p) p$host == host, parsed)
     iny <- Filter(function(p) p$year == year, fs)
 
+    # Assign each month its finest-granularity file (monthly > quarter > annual).
     month_file <- vector("list", 12L)
     for (p in Filter(function(p) p$period_type == "year", iny)) {
       for (mo in 1:12) month_file[[mo]] <- p$path
     }
     for (p in Filter(function(p) p$period_type == "quarter", iny)) {
-      q <- as.integer(substr(p$period, 2, 2))
-      for (mo in ((q - 1) * 3 + 1):((q - 1) * 3 + 3)) month_file[[mo]] <- p$path
+      for (mo in physical_months(p)) month_file[[mo]] <- p$path
     }
     for (p in Filter(function(p) p$period_type == "month", iny)) {
-      month_file[[as.integer(p$period)]] <- p$path
+      month_file[[physical_months(p)]] <- p$path
     }
-    sel <- unique(unlist(month_file))
+
+    # A file is read only if it owns ALL the months it physically covers. If it
+    # owns none, a finer file fully supersedes it -> drop. If it owns some but
+    # not all, a finer file PARTIALLY overlaps it -> reading both would silently
+    # double-count the shared months, so fail loudly (this requires per-file
+    # month filtering that the current disjoint-granularity source never needs).
+    sel <- character(0)
+    for (p in iny) {
+      phys  <- physical_months(p)
+      owned <- sum(vapply(phys, function(mo) identical(month_file[[mo]], p$path), logical(1)))
+      if (owned == 0L) next
+      if (owned < length(phys)) {
+        stop("overlapping source granularities for year ", year, ": ", p$path,
+             " is partially superseded by a finer file (would double-count)")
+      }
+      sel <- c(sel, p$path)
+    }
 
     prev <- Filter(function(p) p$year == year - 1L, fs)
     prev_dec <- NULL
