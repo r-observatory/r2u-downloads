@@ -1,4 +1,4 @@
-# scripts/helpers.R — pure functions used by update.R, unit-tested in tests/testthat/.
+# scripts/helpers.R: pure functions used by update.R, unit-tested in tests/testthat/.
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
@@ -54,8 +54,8 @@ window_years <- function(anchor_date, window_days = 400L) {
 #' For each host (r2u, rob): pick, per month, the finest-granularity file
 #' (monthly > quarterly > annual) so overlapping periods never double-count;
 #' then add the trailing predecessor file (December of year-1) so the early
-#' hours of Jan-1 — which physically live in the prior month's file (files are
-#' cut at ~06:00 UTC on the 1st) — are available. Callers keep only rows whose
+#' hours of Jan-1, which physically live in the prior month's file (files are
+#' cut at ~06:00 UTC on the 1st), are available. Callers keep only rows whose
 #' content-date falls in `year`.
 files_for_year <- function(all_files, year) {
   parsed <- lapply(all_files, parse_period)
@@ -251,7 +251,7 @@ extract_year_rows <- function(con, year) {
 }
 
 #' The rolling N-day window of daily rows, anchored to `anchor_date` (the latest
-#' data date), NOT to today — r2u data lags ~1 month.
+#' data date), NOT to today, because r2u data lags ~1 month.
 extract_recent_rows <- function(con, anchor_date, window_days = 400L) {
   cutoff <- format(as.Date(anchor_date) - as.integer(window_days), "%Y-%m-%d")
   DBI::dbGetQuery(con, "
@@ -329,37 +329,33 @@ write_manifest <- function(path, obj) {
 
 #' Render the GitHub release body (markdown) from a manifest object.
 #'
-#' The release page should be self-describing — freshness, what changed this run,
-#' and per-shard coverage — without making consumers open manifest.json.
+#' The release page should be self-describing (freshness, what changed this run,
+#' and per-shard coverage) without making consumers open manifest.json.
 write_release_notes <- function(path, manifest) {
-  or_dash <- function(x) {
-    if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x))) "—" else as.character(x)
+  or_na <- function(x) {
+    if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x))) "n/a" else as.character(x)
   }
   big <- function(x) {
     if (is.null(x) || length(x) == 0 || is.na(x)) "0" else formatC(as.numeric(x), format = "d", big.mark = ",")
   }
-  ts <- function(s) if (is.null(s) || is.na(s)) "—" else sub("Z$", " UTC", sub("T", " ", s))
+  ts <- function(s) if (is.null(s) || is.na(s)) "n/a" else sub("Z$", " UTC", sub("T", " ", s))
 
   cs <- manifest$changed_shards
   changed <- if (length(cs) == 0) "none (no upstream change since last run)" else paste(unlist(cs), collapse = ", ")
   sha <- manifest$upstream_head_sha %||% ""
-  sha <- if (nzchar(sha)) substr(sha, 1, 7) else "—"
+  sha <- if (nzchar(sha)) substr(sha, 1, 7) else "n/a"
 
   lines <- c(
-    "# r2u Downloads (rolling)",
+    "Aggregated r2u (CRAN as Ubuntu Binaries) `.deb` download counts, sourced from [`eddelbuettel/r2u-logs`](https://github.com/eddelbuettel/r2u-logs). Counts are raw, un-deduplicated apt/CI/Docker request volume, complete only through the end of the previous month. See the [README](https://github.com/r-observatory/r2u-downloads#readme) for the full caveats.",
     "",
-    "Aggregated **r2u** (CRAN as Ubuntu Binaries) `.deb` download counts, sourced from",
-    "[`eddelbuettel/r2u-logs`](https://github.com/eddelbuettel/r2u-logs). Counts are raw,",
-    "un-deduplicated apt/CI/Docker request volume, complete only through the end of the",
-    "previous month — see the",
-    "[README](https://github.com/r-observatory/r2u-downloads#readme) for the full caveats.",
+    "This is a single rolling release. The assets below are SQLite shards: per-year archives (`r2u-YYYY.db`), a rolling 400-day window (`r2u-recent.db`), and a summary-only file (`r2u-summary.db`), alongside `manifest.json`. Each daily run replaces only the shards that changed and refreshes this page.",
     "",
     "| | |",
     "|---|---|",
     sprintf("| **Last checked** | %s |", ts(manifest$last_checked)),
     sprintf("| **Last data change** | %s |", ts(manifest$last_changed)),
     sprintf("| **Upstream** | `%s` @ `%s` |",
-            or_dash(manifest$upstream_repo %||% "eddelbuettel/r2u-logs"), sha),
+            or_na(manifest$upstream_repo %||% "eddelbuettel/r2u-logs"), sha),
     sprintf("| **Source rows read (last run)** | %s |", big(manifest$summary$source_rows_read)),
     sprintf("| **Changed this run** | %s |", changed),
     "",
@@ -372,7 +368,7 @@ write_release_notes <- function(path, manifest) {
   for (nm in sort(names(shards))) {
     s <- shards[[nm]]
     lines <- c(lines, sprintf("| `%s` | %s | %s | %s |",
-                              nm, big(s$rows), or_dash(s$date_min), or_dash(s$date_max)))
+                              nm, big(s$rows), or_na(s$date_min), or_na(s$date_max)))
   }
   lines <- c(lines, "",
     "_Fetch the rolling 400-day window:_",

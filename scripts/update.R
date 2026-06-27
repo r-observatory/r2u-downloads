@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# scripts/update.R — change-gated r2u-downloads producer.
+# scripts/update.R: change-gated r2u-downloads producer.
 #
 # Every run: pull the prior manifest, diff the source repo's per-file blob SHAs,
 # and either heartbeat (no change -> bump last_checked) or rebuild the affected
@@ -302,7 +302,7 @@ gh_capture <- function(args) {
 
 # Best-effort canonical-case map, CRAN only (lowercased token -> canonical).
 # Bioconductor names are not included, so r-bioc- packages fall back to their
-# lowercased token in name_display — acceptable since name_display is a non-key,
+# lowercased token in name_display, acceptable since name_display is a non-key,
 # display-only field (see the spec's name-casing decision). Lowercase collisions
 # (which CRAN forbids) resolve to the lexicographically first canonical name.
 build_name_map <- function(cran_repo = "https://cloud.r-project.org") {
