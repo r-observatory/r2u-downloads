@@ -284,3 +284,22 @@ apply_name_display <- function(summary_df, name_map) {
   summary_df[c("package", "name_display",
                setdiff(names(summary_df), c("package", "name_display")))]
 }
+
+# ---------------------------------------------------------------------------
+# Manifest (run report + persistent state)
+# ---------------------------------------------------------------------------
+
+#' Carry forward the per-shard coverage map, overwriting entries for shards
+#' rebuilt this run. `prev` may be NULL (cold start).
+merge_shard_coverage <- function(prev, updates) {
+  out <- prev %||% list()
+  for (k in names(updates)) out[[k]] <- updates[[k]]
+  out
+}
+
+#' Write the manifest object as pretty JSON, preserving nulls and empty arrays.
+write_manifest <- function(path, obj) {
+  writeLines(
+    jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE, null = "null"),
+    path)
+}
