@@ -109,3 +109,36 @@ diff_source_state <- function(prev_map, curr_map) {
     function(n) !identical(prev_map[[n]]$sha, curr_map[[n]]$sha), logical(1))]
   sort(unique(c(added, modified, deleted)))
 }
+
+# ---------------------------------------------------------------------------
+# Log cleaning + aggregation (DuckDB)
+# ---------------------------------------------------------------------------
+
+#' Build the DuckDB query that turns raw r2u log files into daily counts.
+#'
+#' Reads each file by header (schema has drifted historically, so never trust
+#' column order), then:
+#'   - derives the day from the authoritative `date` timestamp (ignores `day`);
+#'   - re-derives the package name from `pkg` by stripping the r-cran-/r-bioc-
+#'     prefix (ignores the unreliable `name` column);
+#'   - drops junk: keeps only repo in (cran,bioc) and arch in (all,amd64,arm64),
+#'     and requires the r-cran-/r-bioc- prefix (this removes trailing-colon rows
+#'     and repo=api probes);
+#'   - unions all given files (both hosts) and counts every row, duplicates
+#'     included.
+#'
+#' @param files character vector of local .csv.zst paths
+#' @return a single SQL string returning columns package,date,repo,dist,arch,count
+clean_aggregate_sql <- function(files) {
+  flist <- paste(sprintf("'%s'", files), collapse = ", ")
+  sprintf("
+    SELECT regexp_replace(pkg, '^r-(cran|bioc)-', '') AS package,
+           substr(date, 1, 10)                        AS date,
+           repo, dist, arch,
+           COUNT(*)                                   AS count
+      FROM read_csv([%s], header = true, all_varchar = true, union_by_name = true)
+     WHERE repo IN ('cran', 'bioc')
+       AND arch IN ('all', 'amd64', 'arm64')
+       AND regexp_matches(pkg, '^r-(cran|bioc)-')
+     GROUP BY 1, 2, 3, 4, 5", flist)
+}
