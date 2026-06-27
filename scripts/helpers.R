@@ -326,3 +326,60 @@ write_manifest <- function(path, obj) {
     jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE, null = "null"),
     path)
 }
+
+#' Render the GitHub release body (markdown) from a manifest object.
+#'
+#' The release page should be self-describing — freshness, what changed this run,
+#' and per-shard coverage — without making consumers open manifest.json.
+write_release_notes <- function(path, manifest) {
+  or_dash <- function(x) {
+    if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x))) "—" else as.character(x)
+  }
+  big <- function(x) {
+    if (is.null(x) || length(x) == 0 || is.na(x)) "0" else formatC(as.numeric(x), format = "d", big.mark = ",")
+  }
+  ts <- function(s) if (is.null(s) || is.na(s)) "—" else sub("Z$", " UTC", sub("T", " ", s))
+
+  cs <- manifest$changed_shards
+  changed <- if (length(cs) == 0) "none (no upstream change since last run)" else paste(unlist(cs), collapse = ", ")
+  sha <- manifest$upstream_head_sha %||% ""
+  sha <- if (nzchar(sha)) substr(sha, 1, 7) else "—"
+
+  lines <- c(
+    "# r2u Downloads (rolling)",
+    "",
+    "Aggregated **r2u** (CRAN as Ubuntu Binaries) `.deb` download counts, sourced from",
+    "[`eddelbuettel/r2u-logs`](https://github.com/eddelbuettel/r2u-logs). Counts are raw,",
+    "un-deduplicated apt/CI/Docker request volume, complete only through the end of the",
+    "previous month — see the",
+    "[README](https://github.com/r-observatory/r2u-downloads#readme) for the full caveats.",
+    "",
+    "| | |",
+    "|---|---|",
+    sprintf("| **Last checked** | %s |", ts(manifest$last_checked)),
+    sprintf("| **Last data change** | %s |", ts(manifest$last_changed)),
+    sprintf("| **Upstream** | `%s` @ `%s` |",
+            or_dash(manifest$upstream_repo %||% "eddelbuettel/r2u-logs"), sha),
+    sprintf("| **Source rows read (last run)** | %s |", big(manifest$summary$source_rows_read)),
+    sprintf("| **Changed this run** | %s |", changed),
+    "",
+    "## Shard coverage",
+    "",
+    "| Shard | Rows | From | To |",
+    "|---|---:|---|---|"
+  )
+  shards <- manifest$shards %||% list()
+  for (nm in sort(names(shards))) {
+    s <- shards[[nm]]
+    lines <- c(lines, sprintf("| `%s` | %s | %s | %s |",
+                              nm, big(s$rows), or_dash(s$date_min), or_dash(s$date_max)))
+  }
+  lines <- c(lines, "",
+    "_Fetch the rolling 400-day window:_",
+    "```bash",
+    "gh release download current --repo r-observatory/r2u-downloads --pattern r2u-recent.db",
+    "```")
+
+  writeLines(lines, path)
+  invisible(NULL)
+}
