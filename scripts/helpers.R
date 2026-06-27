@@ -142,3 +142,73 @@ clean_aggregate_sql <- function(files) {
        AND regexp_matches(pkg, '^r-(cran|bioc)-')
      GROUP BY 1, 2, 3, 4, 5", flist)
 }
+
+# ---------------------------------------------------------------------------
+# SQLite shard export
+# ---------------------------------------------------------------------------
+
+#' Write daily rows to a fresh SQLite shard (overwrite, canonical schema, VACUUM).
+#'
+#' @param path  output .db path
+#' @param rows  data.frame(package, date, repo, dist, arch, count)
+export_shard <- function(path, rows) {
+  if (file.exists(path)) unlink(path)
+  con <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+
+  DBI::dbExecute(con, "PRAGMA journal_mode=DELETE")  # no WAL in published shards
+  DBI::dbExecute(con, "
+    CREATE TABLE r2u_downloads_daily (
+      package TEXT    NOT NULL,
+      date    TEXT    NOT NULL,
+      repo    TEXT    NOT NULL,
+      dist    TEXT    NOT NULL,
+      arch    TEXT    NOT NULL,
+      count   INTEGER NOT NULL,
+      PRIMARY KEY (package, date, repo, dist, arch))")
+  DBI::dbExecute(con, "CREATE INDEX idx_rdd_date ON r2u_downloads_daily(date)")
+
+  if (nrow(rows) > 0) {
+    DBI::dbBegin(con)
+    DBI::dbExecute(con, "
+      INSERT INTO r2u_downloads_daily (package, date, repo, dist, arch, count)
+      VALUES (?, ?, ?, ?, ?, ?)",
+      params = list(rows$package, rows$date, rows$repo, rows$dist, rows$arch, rows$count))
+    DBI::dbCommit(con)
+  }
+
+  DBI::dbExecute(con, "VACUUM")
+  invisible(NULL)
+}
+
+#' Write a minimal SQLite file containing ONLY the summary table.
+#'
+#' @param path     output .db path
+#' @param summary  data.frame matching the r2u_downloads_summary schema
+export_summary_shard <- function(path, summary) {
+  if (file.exists(path)) unlink(path)
+  con <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(con), add = TRUE)
+
+  DBI::dbExecute(con, "PRAGMA journal_mode=DELETE")
+  DBI::dbExecute(con, "
+    CREATE TABLE r2u_downloads_summary (
+      package       TEXT PRIMARY KEY,
+      name_display  TEXT,
+      repo          TEXT,
+      total_30d     INTEGER,
+      total_90d     INTEGER,
+      total_365d    INTEGER,
+      rank_30d      INTEGER,
+      rank_90d      INTEGER,
+      rank_365d     INTEGER,
+      avg_daily_30d REAL,
+      trend         REAL)")
+
+  if (nrow(summary) > 0) {
+    DBI::dbWriteTable(con, "r2u_downloads_summary", summary, append = TRUE)
+  }
+
+  DBI::dbExecute(con, "VACUUM")
+  invisible(NULL)
+}
