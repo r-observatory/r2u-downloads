@@ -21,6 +21,9 @@ test_that("release notes render freshness, changed shards, and a coverage table"
   expect_match(md, "115,484,344", fixed = TRUE)          # formatted source rows
   expect_match(md, "`r2u-recent.db` | 5,290,111", fixed = TRUE)  # coverage row, formatted
   expect_match(md, "2025-04-27", fixed = TRUE)
+  expect_match(md, "single rolling release", fixed = TRUE)  # describes the release itself
+  expect_false(startsWith(md, "#"))                      # no redundant H1 title
+  expect_false(grepl("—", md))                      # no em dashes
 })
 
 test_that("a heartbeat (no changed shards) says so", {

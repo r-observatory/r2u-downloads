@@ -1,6 +1,6 @@
 # r2u Downloads
 
-Daily download counts for [r2u](https://eddelbuettel.github.io/r2u/) — Dirk
+Daily download counts for [r2u](https://eddelbuettel.github.io/r2u/), Dirk
 Eddelbuettel's "CRAN as Ubuntu Binaries" service, which serves CRAN and
 Bioconductor packages as Ubuntu `.deb` binaries installed via `apt`/`bspm`.
 Counts are aggregated from the raw access logs published at
@@ -10,11 +10,11 @@ published as a set of SQLite shard files attached to a single rolling GitHub
 release tag (`current`).
 
 > [!IMPORTANT]
-> **What an r2u "download" means — and what it does not.** Each count is a raw
+> **What an r2u "download" means, and what it does not.** Each count is a raw
 > HTTP fetch of a `.deb` from the r2u apt repository: a binary install via
 > `apt`/`bspm`, a direct `apt install`, or a Docker/CI layer build. These logs
 > carry **no IP, user-agent, or status**, so there is **no bot filtering and no
-> unique-user de-duplication** — counts are inflated by CI pipelines and Docker
+> unique-user de-duplication**, so counts are inflated by CI pipelines and Docker
 > image builds that re-pull the same packages. They measure a **different
 > population on a different mirror** than the
 > [cranlogs](https://cranlogs.r-pkg.org/) numbers in
@@ -123,7 +123,7 @@ gh release download current \
 ### Manifest
 
 `manifest.json` lists which shards changed in the most recent run, the upstream
-commit observed, and freshness timestamps (`last_checked`, `last_changed`) —
+commit observed, and freshness timestamps (`last_checked`, `last_changed`). It is
 useful for downstream consumers and freshness dashboards.
 
 ```bash
@@ -210,9 +210,9 @@ A daily GitHub Actions job compares the per-file blob SHAs of
 [`eddelbuettel/r2u-logs`](https://github.com/eddelbuettel/r2u-logs) against the
 last run (recorded in `manifest.json`). When nothing changed it just refreshes
 `last_checked`. When a month's file is added or corrected, it rebuilds only the
-affected year shard(s) — fetching the `.csv.zst` logs, aggregating them with
-DuckDB, dropping malformed/probe rows, re-deriving package names, and unioning
-both hosts — then reassembles the rolling `r2u-recent.db` and summary.
+affected year shard(s): it fetches the `.csv.zst` logs, aggregates them with
+DuckDB, drops malformed/probe rows, re-derives package names, and unions
+both hosts, then reassembles the rolling `r2u-recent.db` and summary.
 
 ## Attribution
 

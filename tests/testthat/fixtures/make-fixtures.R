@@ -52,7 +52,7 @@ write_zst("r2u/r2u_r2u-2025-12.csv.zst", c(
   "2025-12-31T23:00:00Z,r2u,jammy,r-cran-dplyr_1.1.4-1.ca2204.1_amd64.deb,r-cran-dplyr,1.1.4-1.ca2204.1,amd64,cran,arrow,2025-12-31",
   "2026-01-01T05:30:00Z,r2u,jammy,r-cran-dplyr_1.1.4-1.ca2204.1_amd64.deb,r-cran-dplyr,1.1.4-1.ca2204.1,amd64,cran,arrow,2026-01-01"))
 
-# rob host, 2025-12: header only (empty data) — exercises the empty-file path.
+# rob host, 2025-12: header only (empty data), exercises the empty-file path.
 write_zst("rob/r2u_rob-2025-12.csv.zst", character(0))
 
 cat("fixtures written to", fixtures_dir, "\n")

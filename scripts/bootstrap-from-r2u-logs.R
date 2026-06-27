@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# scripts/bootstrap-from-r2u-logs.R — one-shot full build from the entire
+# scripts/bootstrap-from-r2u-logs.R: one-shot full build from the entire
 # eddelbuettel/r2u-logs history.
 #
 # update.R is self-bootstrapping (an empty release => every source file is
