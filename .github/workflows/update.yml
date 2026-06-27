@@ -61,7 +61,7 @@ jobs:
             git push -f origin current || true
             gh release create current \
               --title "r2u Downloads (rolling)" \
-              --notes "Latest shards. See manifest.json for what changed in the most recent run." \
+              --notes-file out/release_notes.md \
               --latest
           fi
 
@@ -79,6 +79,10 @@ jobs:
           # ...then manifest.json LAST, so a crash before this point leaves the
           # prior manifest authoritative and the next run safely re-derives.
           gh release upload current out/manifest.json --clobber
+
+          # Refresh the release body so the release page is self-describing
+          # (freshness + what changed + per-shard coverage) every run.
+          gh release edit current --notes-file out/release_notes.md
 
       - name: Update last run timestamp
         continue-on-error: true

@@ -167,6 +167,7 @@ run_update <- function(io, out_dir) {
     out$changed_shards    <- list()
     out$summary           <- list(affected_years = list(), source_rows_read = 0L)
     write_manifest(manifest_path, out)
+    write_release_notes(file.path(out_dir, "release_notes.md"), out)
     return(list(changed_shards = character(0), manifest = out))
   }
 
@@ -269,6 +270,7 @@ run_update <- function(io, out_dir) {
                              source_rows_read = source_rows_read)
   )
   write_manifest(manifest_path, out)
+  write_release_notes(file.path(out_dir, "release_notes.md"), out)
   list(changed_shards = changed_shards, manifest = out)
 }
 
