@@ -1,0 +1,61 @@
+mk_daily <- function() {
+  rows <- data.frame(
+    package = c("dplyr", "dplyr", "oldpkg"),
+    date    = c("2026-05-30", "2026-04-15", "2026-05-29"),
+    repo    = c("cran", "cran", "bioc"),
+    dist    = "jammy", arch = "amd64",
+    count   = c(100L, 50L, 7L), stringsAsFactors = FALSE)
+  con <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  DBI::dbExecute(con, "CREATE TABLE r2u_downloads_daily
+    (package TEXT, date TEXT, repo TEXT, dist TEXT, arch TEXT, count INTEGER)")
+  DBI::dbWriteTable(con, "r2u_downloads_daily", rows, append = TRUE)
+  con
+}
+
+test_that("summary anchors windows to the anchor date and computes trend", {
+  con <- mk_daily(); on.exit(DBI::dbDisconnect(con))
+  s <- DBI::dbGetQuery(con, summary_sql("2026-05-30"))
+  dp <- s[s$package == "dplyr", ]
+  expect_equal(dp$total_30d, 100L)   # only 2026-05-30 falls in the last 30 days
+  expect_equal(dp$total_90d, 150L)   # both dplyr rows fall in the last 90 days
+  expect_equal(dp$total_365d, 150L)
+  # 2026-04-15 sits in the prior-30d window (2026-03-31..2026-04-30): trend = (100/50-1)*100
+  expect_equal(dp$trend, 100.0)
+  expect_equal(dp$rank_30d, 1L)
+  expect_equal(dp$avg_daily_30d, round(100 / 30, 2))
+})
+
+test_that("trend is NULL when the prior-30d window has no downloads", {
+  con <- mk_daily(); on.exit(DBI::dbDisconnect(con))
+  s <- DBI::dbGetQuery(con, summary_sql("2026-05-30"))
+  op <- s[s$package == "oldpkg", ]   # only a single recent row, nothing 30-60d prior
+  expect_equal(op$total_30d, 7L)
+  expect_true(is.na(op$trend))
+})
+
+test_that("repo collapses to a single value, 'mixed' only when a name spans both repos", {
+  con <- mk_daily()
+  DBI::dbExecute(con, "INSERT INTO r2u_downloads_daily VALUES ('dplyr','2026-05-30','bioc','jammy','amd64',1)")
+  on.exit(DBI::dbDisconnect(con))
+  s <- DBI::dbGetQuery(con, summary_sql("2026-05-30"))
+  expect_equal(s$repo[s$package == "dplyr"], "mixed")
+  expect_equal(s$repo[s$package == "oldpkg"], "bioc")
+})
+
+test_that("extract_recent_rows respects the window cutoff, extract_year_rows filters by year", {
+  con <- mk_daily(); on.exit(DBI::dbDisconnect(con))
+  rec <- extract_recent_rows(con, "2026-05-30", window_days = 20L)  # cutoff 2026-05-10
+  expect_setequal(unique(rec$date), c("2026-05-30", "2026-05-29"))  # 2026-04-15 excluded
+  yr <- extract_year_rows(con, 2026)
+  expect_equal(nrow(yr), 3L)
+})
+
+test_that("apply_name_display maps known names and falls back to the lowercased token", {
+  s <- data.frame(
+    package = c("dplyr", "obscurelowercasepkg"), repo = "cran",
+    total_30d = 1L, stringsAsFactors = FALSE)
+  nm <- c("dplyr" = "dplyr", "rcpp" = "Rcpp")
+  out <- apply_name_display(s, nm)
+  expect_equal(out$name_display, c("dplyr", "obscurelowercasepkg"))
+  expect_equal(names(out)[1:2], c("package", "name_display"))
+})

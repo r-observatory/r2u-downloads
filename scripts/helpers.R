@@ -212,3 +212,75 @@ export_summary_shard <- function(path, summary) {
   DBI::dbExecute(con, "VACUUM")
   invisible(NULL)
 }
+
+# ---------------------------------------------------------------------------
+# Windowing + summary
+# ---------------------------------------------------------------------------
+
+#' All daily rows for one calendar year (sorted), from a working SQLite store.
+extract_year_rows <- function(con, year) {
+  DBI::dbGetQuery(con, "
+    SELECT package, date, repo, dist, arch, count
+      FROM r2u_downloads_daily
+     WHERE substr(date, 1, 4) = ?
+     ORDER BY package, date, repo, dist, arch",
+    params = list(sprintf("%04d", as.integer(year))))
+}
+
+#' The rolling N-day window of daily rows, anchored to `anchor_date` (the latest
+#' data date), NOT to today — r2u data lags ~1 month.
+extract_recent_rows <- function(con, anchor_date, window_days = 400L) {
+  cutoff <- format(as.Date(anchor_date) - as.integer(window_days), "%Y-%m-%d")
+  DBI::dbGetQuery(con, "
+    SELECT package, date, repo, dist, arch, count
+      FROM r2u_downloads_daily
+     WHERE date >= ?
+     ORDER BY package, date, repo, dist, arch",
+    params = list(cutoff))
+}
+
+#' SQLite query that builds the per-package summary over the table
+#' r2u_downloads_daily, collapsing across repo/dist/arch. All windows end at
+#' `anchor_date`. trend is NULL when the prior-30d total is 0.
+summary_sql <- function(anchor_date) {
+  a <- format(as.Date(anchor_date), "%Y-%m-%d")
+  sprintf("
+    WITH agg AS (
+      SELECT package,
+        CASE WHEN COUNT(DISTINCT repo) > 1 THEN 'mixed' ELSE MAX(repo) END AS repo,
+        SUM(CASE WHEN date >= date('%s','-30 days')  THEN count ELSE 0 END) AS total_30d,
+        SUM(CASE WHEN date >= date('%s','-90 days')  THEN count ELSE 0 END) AS total_90d,
+        SUM(CASE WHEN date >= date('%s','-365 days') THEN count ELSE 0 END) AS total_365d,
+        SUM(CASE WHEN date >= date('%s','-60 days') AND date < date('%s','-30 days')
+                 THEN count ELSE 0 END) AS prev_30d
+      FROM r2u_downloads_daily
+      WHERE date >= date('%s','-365 days')
+      GROUP BY package),
+    f AS (
+      SELECT package, repo, total_30d, total_90d, total_365d,
+             ROUND(total_30d / 30.0, 2) AS avg_daily_30d,
+             CASE WHEN prev_30d > 0
+                  THEN ROUND((total_30d * 1.0 / prev_30d - 1.0) * 100.0, 2)
+                  ELSE NULL END AS trend
+      FROM agg)
+    SELECT package, repo, total_30d, total_90d, total_365d,
+           RANK() OVER (ORDER BY total_30d  DESC) AS rank_30d,
+           RANK() OVER (ORDER BY total_90d  DESC) AS rank_90d,
+           RANK() OVER (ORDER BY total_365d DESC) AS rank_365d,
+           avg_daily_30d, trend
+      FROM f", a, a, a, a, a, a)
+}
+
+#' Add the best-effort canonical `name_display` column to a summary data.frame.
+#'
+#' `name_map` is a named character vector (names = lowercased token, values =
+#' canonical name). Unmatched packages fall back to their lowercased token.
+#' `name_display` is placed second (after `package`) to match the shard schema.
+apply_name_display <- function(summary_df, name_map) {
+  disp <- unname(name_map[summary_df$package])
+  miss <- is.na(disp)
+  disp[miss] <- summary_df$package[miss]
+  summary_df$name_display <- disp
+  summary_df[c("package", "name_display",
+               setdiff(names(summary_df), c("package", "name_display")))]
+}
