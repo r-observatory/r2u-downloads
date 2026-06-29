@@ -110,6 +110,42 @@ test_that("a failed window-year shard download aborts (never publishes truncated
   expect_error(run_update(io, out), "window-year shard")
 })
 
+test_that("force_full = TRUE forces a full rebuild even when upstream is unchanged", {
+  skip_if_not_installed("duckdb")
+  out <- withr::local_tempdir()
+
+  curr <- list(
+    "r2u/r2u_r2u-2026-01.csv.zst" = list(sha = "a", size = 1),
+    "rob/r2u_rob-2026-01.csv.zst" = list(sha = "b", size = 1),
+    "r2u/r2u_r2u-2025-12.csv.zst" = list(sha = "c", size = 1),
+    "rob/r2u_rob-2025-12.csv.zst" = list(sha = "d", size = 1))
+
+  # Prior manifest carries the SAME SHAs so a normal run would be a heartbeat.
+  prev <- list(
+    source_files = curr,
+    shards       = list(),
+    last_changed = "2026-05-01T00:00:00Z")
+  writeLines(jsonlite::toJSON(prev, auto_unbox = TRUE), file.path(out, "manifest.json"))
+
+  io <- list(
+    release_exists   = function() TRUE,
+    release_download = function(pattern, dir) 0L,   # manifest pre-written above
+    contents         = function() curr,
+    head_sha         = function() "deadbeef",
+    fetch_sources    = function(paths, dir)
+      stats::setNames(vapply(paths, function(p) fixture_path(p), character(1)), paths),
+    name_map         = function() c("dplyr" = "dplyr"),
+    now              = function() as.POSIXct("2026-06-01 06:00:00", tz = "UTC"))
+
+  res <- run_update(io, out, force_full = TRUE)
+
+  expect_gt(length(res$changed_shards), 0)
+  expect_true("r2u-2026.db" %in% res$changed_shards)
+  expect_true("r2u-2025.db" %in% res$changed_shards)
+  expect_true("r2u-recent.db" %in% res$changed_shards)
+  expect_true("r2u-summary.db" %in% res$changed_shards)
+})
+
 test_that("a fully-deleted upstream year publishes an empty shard, leaving recent/summary alone", {
   out <- withr::local_tempdir()
   prev <- list(

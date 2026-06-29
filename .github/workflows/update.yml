@@ -7,6 +7,11 @@ on:
     # rebuilds shards when a source file's blob SHA actually changed.
     - cron: "0 6 * * *"
   workflow_dispatch:
+    inputs:
+      force_full_rebuild:
+        description: "Rebuild every shard from scratch with the current code (ignore the prior manifest). Use after a code change to the aggregation."
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -46,6 +51,7 @@ jobs:
       - name: Run update script
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          R2U_FORCE_REBUILD: ${{ inputs.force_full_rebuild }}
         run: |
           mkdir -p out
           Rscript scripts/update.R out/

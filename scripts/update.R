@@ -126,7 +126,7 @@ embed_summary <- function(recent_path, summary_df) {
 #'   now() -> POSIXct
 #' @param out_dir directory to write shards + manifest into
 #' @return list(changed_shards, manifest)
-run_update <- function(io, out_dir) {
+run_update <- function(io, out_dir, force_full = FALSE) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   manifest_path <- file.path(out_dir, "manifest.json")
 
@@ -148,6 +148,11 @@ run_update <- function(io, out_dir) {
   }
   prev_sources <- prev$source_files %||% list()
   prev_shards  <- prev$shards %||% list()
+
+  # force_full: treat every current source file as changed (reuses the proven
+  # cold-start path) without deleting the live release. prev_shards is kept so
+  # coverage merge still works when all shards are rebuilt.
+  if (isTRUE(force_full)) prev_sources <- list()
 
   # 2. Current upstream state.
   curr <- io$contents()
@@ -300,17 +305,31 @@ gh_capture <- function(args) {
   out
 }
 
-# Best-effort canonical-case map, CRAN only (lowercased token -> canonical).
-# Bioconductor names are not included, so r-bioc- packages fall back to their
-# lowercased token in name_display, acceptable since name_display is a non-key,
-# display-only field (see the spec's name-casing decision). Lowercase collisions
-# (which CRAN forbids) resolve to the lexicographically first canonical name.
-build_name_map <- function(cran_repo = "https://cloud.r-project.org") {
-  canon <- tryCatch(rownames(available.packages(repos = cran_repo)),
-                    error = function(e) character(0))
-  canon <- sort(unique(canon))
+# Build a lowercased-token -> canonical-name map from a character vector.
+# The first occurrence per lowercased token wins, so pass the vector in
+# repo-priority order (CRAN first) to get CRAN spellings on collision.
+.make_name_map <- function(canon) {
   canon <- canon[!duplicated(tolower(canon))]
   stats::setNames(canon, tolower(canon))
+}
+
+# Best-effort canonical-case map (lowercased token -> canonical).
+# Fetches CRAN and the four Bioconductor release repositories so that
+# r-bioc- packages receive correct casing in name_display. CRAN names take
+# precedence on a lowercase collision because deduplication runs on the
+# repo-ordered vector (CRAN listed first) before any sorting, so the CRAN
+# spelling is always kept.
+build_name_map <- function(
+    cran_repo = "https://cloud.r-project.org",
+    bioc_repos = c(
+      "https://bioconductor.org/packages/release/bioc",
+      "https://bioconductor.org/packages/release/data/annotation",
+      "https://bioconductor.org/packages/release/data/experiment",
+      "https://bioconductor.org/packages/release/workflows")) {
+  canon <- tryCatch(
+    rownames(available.packages(repos = c(cran_repo, bioc_repos))),
+    error = function(e) character(0))
+  .make_name_map(canon)
 }
 
 default_io <- function() {
@@ -374,8 +393,9 @@ default_io <- function() {
 
 if (sys.nframe() == 0L) {
   args <- commandArgs(trailingOnly = TRUE)
-  out_dir <- if (length(args) >= 1) args[1] else "out"
-  res <- run_update(default_io(), out_dir)
+  out_dir    <- if (length(args) >= 1) args[1] else "out"
+  force_full <- tolower(Sys.getenv("R2U_FORCE_REBUILD", "")) %in% c("true", "1", "yes")
+  res <- run_update(default_io(), out_dir, force_full = force_full)
   cat("Changed shards:", if (length(res$changed_shards))
         paste(res$changed_shards, collapse = ", ") else "(none)", "\n")
 }
