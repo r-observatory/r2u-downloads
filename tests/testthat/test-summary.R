@@ -59,3 +59,11 @@ test_that("apply_name_display maps known names and falls back to the lowercased 
   expect_equal(out$name_display, c("dplyr", "obscurelowercasepkg"))
   expect_equal(names(out)[1:2], c("package", "name_display"))
 })
+
+test_that("apply_name_display uses Bioconductor canonical casing from the map", {
+  df <- data.frame(package = c("biocgenerics", "dplyr"), total_30d = c(1L, 2L),
+                   stringsAsFactors = FALSE)
+  nm <- c(biocgenerics = "BiocGenerics", dplyr = "dplyr")
+  out <- apply_name_display(df, nm)
+  expect_equal(out$name_display[out$package == "biocgenerics"], "BiocGenerics")
+})
