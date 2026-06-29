@@ -126,7 +126,7 @@ embed_summary <- function(recent_path, summary_df) {
 #'   now() -> POSIXct
 #' @param out_dir directory to write shards + manifest into
 #' @return list(changed_shards, manifest)
-run_update <- function(io, out_dir) {
+run_update <- function(io, out_dir, force_full = FALSE) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   manifest_path <- file.path(out_dir, "manifest.json")
 
@@ -148,6 +148,11 @@ run_update <- function(io, out_dir) {
   }
   prev_sources <- prev$source_files %||% list()
   prev_shards  <- prev$shards %||% list()
+
+  # force_full: treat every current source file as changed (reuses the proven
+  # cold-start path) without deleting the live release. prev_shards is kept so
+  # coverage merge still works when all shards are rebuilt.
+  if (isTRUE(force_full)) prev_sources <- list()
 
   # 2. Current upstream state.
   curr <- io$contents()
@@ -388,8 +393,9 @@ default_io <- function() {
 
 if (sys.nframe() == 0L) {
   args <- commandArgs(trailingOnly = TRUE)
-  out_dir <- if (length(args) >= 1) args[1] else "out"
-  res <- run_update(default_io(), out_dir)
+  out_dir    <- if (length(args) >= 1) args[1] else "out"
+  force_full <- tolower(Sys.getenv("R2U_FORCE_REBUILD", "")) %in% c("true", "1", "yes")
+  res <- run_update(default_io(), out_dir, force_full = force_full)
   cat("Changed shards:", if (length(res$changed_shards))
         paste(res$changed_shards, collapse = ", ") else "(none)", "\n")
 }
