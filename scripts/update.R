@@ -300,14 +300,21 @@ gh_capture <- function(args) {
   out
 }
 
-# Best-effort canonical-case map, CRAN only (lowercased token -> canonical).
-# Bioconductor names are not included, so r-bioc- packages fall back to their
-# lowercased token in name_display, acceptable since name_display is a non-key,
-# display-only field (see the spec's name-casing decision). Lowercase collisions
-# (which CRAN forbids) resolve to the lexicographically first canonical name.
-build_name_map <- function(cran_repo = "https://cloud.r-project.org") {
-  canon <- tryCatch(rownames(available.packages(repos = cran_repo)),
-                    error = function(e) character(0))
+# Best-effort canonical-case map (lowercased token -> canonical).
+# Fetches CRAN and the four Bioconductor release repositories so that
+# r-bioc- packages receive correct casing in name_display. Lowercase
+# collisions resolve to the lexicographically first canonical name (CRAN
+# repos are listed first so CRAN names take precedence on any collision).
+build_name_map <- function(
+    cran_repo = "https://cloud.r-project.org",
+    bioc_repos = c(
+      "https://bioconductor.org/packages/release/bioc",
+      "https://bioconductor.org/packages/release/data/annotation",
+      "https://bioconductor.org/packages/release/data/experiment",
+      "https://bioconductor.org/packages/release/workflows")) {
+  canon <- tryCatch(
+    rownames(available.packages(repos = c(cran_repo, bioc_repos))),
+    error = function(e) character(0))
   canon <- sort(unique(canon))
   canon <- canon[!duplicated(tolower(canon))]
   stats::setNames(canon, tolower(canon))
