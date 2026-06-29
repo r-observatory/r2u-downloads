@@ -43,8 +43,11 @@ write_zst("r2u/r2u_r2u-2026-01.csv.zst", c(
   "2026-01-06T05:00:00Z,r2u,jammy,bioc-api-package_0.1.0_all.deb,bioc-api-package,0.1.0,all,api,package,2026-01-06"))
 
 # rob host, 2026-01: one dplyr fetch (host union must add it to the r2u count).
+# repo=bioc is an intentional mislabel: rob misreports r-cran- packages as bioc.
+# The prefix-origin test proves we ignore the raw repo column and derive origin
+# from the r-cran-/r-bioc- deb-name prefix instead.
 write_zst("rob/r2u_rob-2026-01.csv.zst", c(
-  "2026-01-05T06:00:00Z,rob,focal,r-cran-dplyr_1.1.4-1.ca2004.1_amd64.deb,r-cran-dplyr,1.1.4-1.ca2004.1,amd64,cran,arrow,2026-01-05"))
+  "2026-01-05T06:00:00Z,rob,focal,r-cran-dplyr_1.1.4-1.ca2004.1_amd64.deb,r-cran-dplyr,1.1.4-1.ca2004.1,amd64,bioc,arrow,2026-01-05"))
 
 # r2u host, 2025-12: a December row (belongs to 2025) PLUS a 2026-01-01 boundary
 # row that physically lives in this file (cut at ~06:00 UTC on the 1st).

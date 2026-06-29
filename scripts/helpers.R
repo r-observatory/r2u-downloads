@@ -144,9 +144,10 @@ diff_source_state <- function(prev_map, curr_map) {
 #'   - derives the day from the authoritative `date` timestamp (ignores `day`);
 #'   - re-derives the package name from `pkg` by stripping the r-cran-/r-bioc-
 #'     prefix (ignores the unreliable `name` column);
-#'   - drops junk: keeps only repo in (cran,bioc) and arch in (all,amd64,arm64),
-#'     and requires the r-cran-/r-bioc- prefix (this removes trailing-colon rows
-#'     and repo=api probes);
+#'   - derives `repo` (cran or bioc) from the pkg prefix via regexp_extract
+#'     (ignores the unreliable `repo` column in the raw log);
+#'   - drops junk by requiring the r-cran-/r-bioc- prefix (removes trailing-colon
+#'     rows and repo=api probes) and restricting arch to (all,amd64,arm64);
 #'   - unions all given files (both hosts) and counts every row, duplicates
 #'     included.
 #'

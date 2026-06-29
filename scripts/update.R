@@ -300,11 +300,20 @@ gh_capture <- function(args) {
   out
 }
 
+# Build a lowercased-token -> canonical-name map from a character vector.
+# The first occurrence per lowercased token wins, so pass the vector in
+# repo-priority order (CRAN first) to get CRAN spellings on collision.
+.make_name_map <- function(canon) {
+  canon <- canon[!duplicated(tolower(canon))]
+  stats::setNames(canon, tolower(canon))
+}
+
 # Best-effort canonical-case map (lowercased token -> canonical).
 # Fetches CRAN and the four Bioconductor release repositories so that
-# r-bioc- packages receive correct casing in name_display. Lowercase
-# collisions resolve to the lexicographically first canonical name (CRAN
-# repos are listed first so CRAN names take precedence on any collision).
+# r-bioc- packages receive correct casing in name_display. CRAN names take
+# precedence on a lowercase collision because deduplication runs on the
+# repo-ordered vector (CRAN listed first) before any sorting, so the CRAN
+# spelling is always kept.
 build_name_map <- function(
     cran_repo = "https://cloud.r-project.org",
     bioc_repos = c(
@@ -315,9 +324,7 @@ build_name_map <- function(
   canon <- tryCatch(
     rownames(available.packages(repos = c(cran_repo, bioc_repos))),
     error = function(e) character(0))
-  canon <- sort(unique(canon))
-  canon <- canon[!duplicated(tolower(canon))]
-  stats::setNames(canon, tolower(canon))
+  .make_name_map(canon)
 }
 
 default_io <- function() {
