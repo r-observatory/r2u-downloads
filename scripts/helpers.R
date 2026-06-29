@@ -157,11 +157,11 @@ clean_aggregate_sql <- function(files) {
   sprintf("
     SELECT regexp_replace(pkg, '^r-(cran|bioc)-', '') AS package,
            substr(date, 1, 10)                        AS date,
-           repo, dist, arch,
+           regexp_extract(pkg, '^r-(cran|bioc)-', 1)  AS repo,
+           dist, arch,
            COUNT(*)                                   AS count
       FROM read_csv([%s], header = true, all_varchar = true, union_by_name = true)
-     WHERE repo IN ('cran', 'bioc')
-       AND arch IN ('all', 'amd64', 'arm64')
+     WHERE arch IN ('all', 'amd64', 'arm64')
        AND regexp_matches(pkg, '^r-(cran|bioc)-')
      GROUP BY 1, 2, 3, 4, 5", flist)
 }

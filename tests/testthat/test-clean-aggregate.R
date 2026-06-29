@@ -25,4 +25,8 @@ test_that("clean_aggregate drops junk, derives day, re-derives name, unions host
 
   # bioc row tagged repo='bioc'
   expect_equal(res$repo[res$package == "biocgenerics"], "bioc")
+
+  # rob mislabels r-cran-dplyr as repo='bioc'; origin must come from the
+  # pkg prefix, so every dplyr row (incl. the rob one) is 'cran', not 'bioc'.
+  expect_true(all(res$repo[res$package == "dplyr"] == "cran"))
 })
