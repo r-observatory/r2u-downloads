@@ -309,6 +309,15 @@ apply_name_display <- function(summary_df, name_map) {
                setdiff(names(summary_df), c("package", "name_display")))]
 }
 
+#' Add the `identity_state` column (live|archived) to a summary data.frame from
+#' a `name_lower -> identity_state` map. A package absent from the ledger gets
+#' NA (honest unknown), never a fabricated state; it is NOT dropped, because r2u
+#' only builds CRAN/Bioc packages and its `repo` prefix already fixes its scope.
+apply_identity_state <- function(summary_df, state_map) {
+  summary_df$identity_state <- unname(state_map[summary_df$package])
+  summary_df
+}
+
 # ---------------------------------------------------------------------------
 # Manifest (run report + persistent state)
 # ---------------------------------------------------------------------------

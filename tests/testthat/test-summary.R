@@ -75,3 +75,14 @@ test_that("apply_name_display uses Bioconductor canonical casing from the map", 
   out <- apply_name_display(df, nm)
   expect_equal(out$name_display[out$package == "biocgenerics"], "BiocGenerics")
 })
+
+test_that("apply_identity_state sets state from the ledger and NA when absent", {
+  sm <- data.frame(package = c("mass", "deseq2", "ghostpkg"),
+                   name_display = c("MASS", "DESeq2", "ghostpkg"),
+                   repo = c("cran", "bioc", "cran"),
+                   stringsAsFactors = FALSE)
+  state_map <- c(mass = "live", deseq2 = "live")   # ghostpkg absent from the ledger
+  out <- apply_identity_state(sm, state_map)
+  expect_equal(out$identity_state, c("live", "live", NA_character_))
+  expect_identical(names(out)[ncol(out)], "identity_state")
+})
