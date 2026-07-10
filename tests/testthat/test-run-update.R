@@ -1,3 +1,102 @@
+# --- reclassify-only helpers -------------------------------------------------
+
+# Seed a prior "current" release into `store` via a normal cold-start run
+# (produces r2u-2025.db, r2u-2026.db, r2u-recent.db, r2u-summary.db, manifest).
+.seed_release_store <- function(store) {
+  curr <- list(
+    "r2u/r2u_r2u-2026-01.csv.zst" = list(sha = "a", size = 1),
+    "rob/r2u_rob-2026-01.csv.zst" = list(sha = "b", size = 1),
+    "r2u/r2u_r2u-2025-12.csv.zst" = list(sha = "c", size = 1),
+    "rob/r2u_rob-2025-12.csv.zst" = list(sha = "d", size = 1))
+  seed_io <- list(
+    release_exists   = function() FALSE,
+    release_download = function(pattern, dir) 1L,
+    contents         = function() curr,
+    head_sha         = function() "deadbeef",
+    fetch_sources    = function(paths, dir)
+      stats::setNames(vapply(paths, function(p) fixture_path(p), character(1)), paths),
+    identity_dbs     = function() make_identity_dbs(cran = "dplyr", bioc = "BiocGenerics"),
+    now              = function() as.POSIXct("2026-06-01 06:00:00", tz = "UTC"))
+  run_update(seed_io, store, live_floor = 1L, bioc_floor = 1L)
+  invisible(store)
+}
+
+# A reclassify io that serves shards from `store` and STOPS if any source-log
+# crawl endpoint is called (proving zero source fetch).
+.reclassify_io <- function(store, identity_dbs, release_exists = TRUE,
+                           now = as.POSIXct("2026-06-15 06:00:00", tz = "UTC")) {
+  list(
+    release_exists   = function() release_exists,
+    release_download = function(pattern, dir) {
+      srcs <- Sys.glob(file.path(store, pattern))
+      if (length(srcs) == 0) return(1L)
+      if (all(file.copy(srcs, dir, overwrite = TRUE))) 0L else 1L
+    },
+    contents         = function() stop("reclassify-only must not crawl source contents"),
+    head_sha         = function() stop("reclassify-only must not read the upstream head sha"),
+    fetch_sources    = function(paths, dir) stop("reclassify-only must not fetch source logs"),
+    identity_dbs     = identity_dbs,
+    now              = function() now)
+}
+
+test_that("reclassify-only republishes the enriched summary from shards, no source crawl", {
+  skip_if_not_installed("duckdb")
+  store <- withr::local_tempdir()
+  .seed_release_store(store)
+  out <- withr::local_tempdir()
+
+  io <- .reclassify_io(store,
+    identity_dbs = function() make_identity_dbs(cran = "dplyr", bioc = "BiocGenerics"))
+
+  res <- run_update(io, out, reclassify_only = TRUE, live_floor = 1L, bioc_floor = 0L)
+
+  # Exactly the recent + summary shards were touched; NO year shard was rewritten
+  # (the raw daily history was never re-fetched).
+  expect_setequal(res$changed_shards, c("r2u-recent.db", "r2u-summary.db"))
+  expect_false(any(grepl("^r2u-20[0-9]{2}\\.db$", res$changed_shards)))
+  expect_true(file.exists(file.path(out, "r2u-summary.db")))
+
+  # Canonical name_display + identity_state carry through -- values that only a
+  # real ledger read yields (the year shards store only lowercased tokens).
+  cs <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "r2u-summary.db"))
+  on.exit(DBI::dbDisconnect(cs), add = TRUE)
+  summ <- DBI::dbGetQuery(cs,
+    "SELECT package, name_display, identity_state FROM r2u_downloads_summary ORDER BY package")
+
+  bg <- summ[summ$package == "biocgenerics", ]
+  expect_equal(bg$name_display, "BiocGenerics")   # canonical casing from the ledger
+  expect_equal(bg$identity_state, "live")
+  dp <- summ[summ$package == "dplyr", ]
+  expect_equal(dp$name_display, "dplyr")
+  expect_equal(dp$identity_state, "live")
+
+  # Manifest reflects a no-source-read republish.
+  man <- jsonlite::fromJSON(file.path(out, "manifest.json"), simplifyVector = FALSE)
+  expect_setequal(unlist(man$changed_shards), c("r2u-recent.db", "r2u-summary.db"))
+  expect_equal(man$summary$source_rows_read, 0L)
+})
+
+test_that("reclassify-only with no prior release aborts", {
+  out <- withr::local_tempdir()
+  io <- .reclassify_io(tempdir(),
+    identity_dbs = function() make_identity_dbs(cran = "dplyr"),
+    release_exists = FALSE)
+  expect_error(run_update(io, out, reclassify_only = TRUE), "existing release")
+})
+
+test_that("reclassify-only with an unreachable ledger aborts (never degrades)", {
+  skip_if_not_installed("duckdb")
+  store <- withr::local_tempdir()
+  .seed_release_store(store)
+  out <- withr::local_tempdir()
+
+  io <- .reclassify_io(store,
+    identity_dbs = function() stop("identity assets unreachable"))
+  expect_error(
+    run_update(io, out, reclassify_only = TRUE, live_floor = 1L, bioc_floor = 0L),
+    "ledger")
+})
+
 test_that("cold-start run_update builds year shards, recent, summary, manifest", {
   skip_if_not_installed("duckdb")
   out <- withr::local_tempdir()
