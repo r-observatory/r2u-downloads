@@ -131,14 +131,115 @@ embed_summary <- function(recent_path, summary_df) {
 #'   identity_dbs() -> list(cran = path, bioc = path) (org identity ledger assets)
 #'   now() -> POSIXct
 #' @param out_dir directory to write shards + manifest into
+#' @param reclassify_only when TRUE, republish the enriched summary from the
+#'   already-published year shards with ZERO source-log fetch (see the branch
+#'   below). Requires an existing release and a reachable identity ledger.
 #' @param live_floor minimum acceptable size of the CRAN identity table before
 #'   the ledger is trusted (else this run degrades honestly, see below)
 #' @param bioc_floor minimum acceptable size of the Bioc identity table
 #' @return list(changed_shards, manifest)
-run_update <- function(io, out_dir, force_full = FALSE,
+run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
                         live_floor = CRAN_NAMES_FLOOR, bioc_floor = BIOC_NAMES_FLOOR) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   manifest_path <- file.path(out_dir, "manifest.json")
+
+  # RECLASSIFY-ONLY: republish the enriched summary (canonical name_display +
+  # identity_state from the org identity ledger) from the ALREADY-PUBLISHED year
+  # shards, with zero source-log fetch. Used when the identity conversion changed
+  # the summary FORMAT but the underlying source data is unchanged, so a normal
+  # run would only heartbeat and never publish the new format. It never touches
+  # io$contents/head_sha/fetch_sources, rewrites no year shard (their raw daily
+  # data is unchanged), and -- unlike a normal run -- ABORTS rather than degrades
+  # if the ledger is unreachable, since (re)applying the ledger is the whole
+  # point. This branch returns before any normal-path source diffing runs, so the
+  # normal + force_full paths below are behaviorally unchanged.
+  if (isTRUE(reclassify_only)) {
+    if (!io$release_exists())
+      stop("reclassify-only needs an existing release")
+    st <- io$release_download("manifest.json", out_dir)
+    if (!identical(st, 0L) || !file.exists(manifest_path)) {
+      stop("release 'current' exists but manifest.json could not be downloaded; ",
+           "aborting so the prior state stays authoritative")
+    }
+    prev        <- jsonlite::fromJSON(manifest_path, simplifyVector = FALSE)
+    prev_shards <- prev$shards %||% list()
+    now         <- io$now()
+
+    # There is no source fetch to set the anchor, so derive the window from the
+    # prior manifest's latest data date (falling back to now's year on a manifest
+    # with no shard coverage), then read the TRUE anchor back from the loaded data.
+    prov_anchor <- prev_shard_max_date(prev_shards)
+    if (is.na(prov_anchor)) prov_anchor <- as.Date(format(now, "%Y-%m-%d", tz = "UTC"))
+    wy <- window_years(prov_anchor, RECENT_WINDOW)
+
+    con_work <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+    on.exit(DBI::dbDisconnect(con_work), add = TRUE)
+    init_daily(con_work)
+    for (w in wy) {
+      shard <- sprintf("r2u-%04d.db", w)
+      st <- io$release_download(shard, out_dir)
+      sp <- file.path(out_dir, shard)
+      if (file.exists(sp)) {
+        load_shard(con_work, sp)
+      } else if (!is.null(prev_shards[[shard]])) {
+        # Prior state says this window-year shard exists, so a missing file is a
+        # failed download, not a genuinely-absent shard: abort rather than rebuild
+        # the summary over a truncated window.
+        stop("reclassify-only: window-year shard ", shard, " is expected on the ",
+             "release (status ", st, ") but could not be downloaded; aborting")
+      }
+      # else: genuinely absent (a year with no published shard) -> skip
+    }
+
+    anchor <- as.Date(DBI::dbGetQuery(con_work,
+      "SELECT MAX(date) AS m FROM r2u_downloads_daily")$m)
+    if (is.na(anchor))
+      stop("reclassify-only: no existing shard data to rebuild the summary")
+
+    summary_df <- DBI::dbGetQuery(con_work, summary_sql(format(anchor)))
+
+    # ABORT (never degrade) on a missing/failed ledger: applying it is the whole
+    # point of this run, so republishing token name_display + NA identity_state
+    # would defeat the purpose and clobber the good summary with a worse one.
+    maps <- tryCatch({
+      dbs <- io$identity_dbs()
+      m   <- build_identity_maps(dbs$cran, dbs$bioc)
+      if (!robservatory::check_size(m$n_cran, floor = live_floor) ||
+          !robservatory::check_size(m$n_bioc, floor = bioc_floor)) {
+        stop("identity size gate failed (cran=", m$n_cran, ", bioc=", m$n_bioc, ")")
+      }
+      m
+    }, error = function(e)
+      stop("reclassify-only requires the identity ledger; aborting rather than ",
+           "republish degraded identity (", conditionMessage(e), ")"))
+
+    s          <- apply_name_display(summary_df, maps$name_map)
+    summary_df <- apply_identity_state(s, maps$state_map)
+    summary_df <- summary_df[SUMMARY_COLS]
+
+    recent_rows <- extract_recent_rows(con_work, anchor, RECENT_WINDOW)
+    recent_path <- file.path(out_dir, "r2u-recent.db")
+    export_shard(recent_path, recent_rows)
+    export_summary_shard(file.path(out_dir, "r2u-summary.db"), summary_df)
+    embed_summary(recent_path, summary_df)
+
+    # FORCE exactly the recent + summary shards: no year shard is rewritten,
+    # since the raw daily history was never re-fetched.
+    changed_shards <- c("r2u-recent.db", "r2u-summary.db")
+    shard_updates  <- list("r2u-recent.db" = coverage(recent_rows))
+
+    out <- prev
+    out$tag            <- sprintf("v%s", format(now, "%Y%m%d-%H%M%S", tz = "UTC"))
+    out$generated_at   <- iso(now)
+    out$last_checked   <- iso(now)
+    out$last_changed   <- iso(now)
+    out$changed_shards <- as.list(changed_shards)
+    out$shards         <- merge_shard_coverage(prev_shards, shard_updates)
+    out$summary        <- list(affected_years = list(), source_rows_read = 0L)
+    write_manifest(manifest_path, out)
+    write_release_notes(file.path(out_dir, "release_notes.md"), out)
+    return(list(changed_shards = changed_shards, manifest = out))
+  }
 
   # 1. Prior manifest (persistent state). Only treat a MISSING manifest as a
   #    cold start when the release genuinely does not exist yet; if the release
@@ -436,9 +537,15 @@ default_io <- function() {
 
 if (sys.nframe() == 0L) {
   args <- commandArgs(trailingOnly = TRUE)
-  out_dir    <- if (length(args) >= 1) args[1] else "out"
-  force_full <- tolower(Sys.getenv("R2U_FORCE_REBUILD", "")) %in% c("true", "1", "yes")
-  res <- run_update(default_io(), out_dir, force_full = force_full)
+  out_dir         <- if (length(args) >= 1) args[1] else "out"
+  reclassify_only <- tolower(Sys.getenv("R2U_RECLASSIFY_ONLY", "")) %in% c("true", "1", "yes")
+  # force_full and reclassify_only are independent env flags, but reclassify_only
+  # is the cheaper, no-source-fetch path -- if both are set it wins and force_full
+  # is ignored, so the two are never both effectively active.
+  force_full <- !reclassify_only &&
+    tolower(Sys.getenv("R2U_FORCE_REBUILD", "")) %in% c("true", "1", "yes")
+  res <- run_update(default_io(), out_dir, force_full = force_full,
+                    reclassify_only = reclassify_only)
   cat("Changed shards:", if (length(res$changed_shards))
         paste(res$changed_shards, collapse = ", ") else "(none)", "\n")
 }
