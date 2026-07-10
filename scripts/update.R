@@ -311,31 +311,26 @@ gh_capture <- function(args) {
   out
 }
 
-# Build a lowercased-token -> canonical-name map from a character vector.
-# The first occurrence per lowercased token wins, so pass the vector in
-# repo-priority order (CRAN first) to get CRAN spellings on collision.
-.make_name_map <- function(canon) {
-  canon <- canon[!duplicated(tolower(canon))]
-  stats::setNames(canon, tolower(canon))
-}
-
-# Best-effort canonical-case map (lowercased token -> canonical).
-# Fetches CRAN and the four Bioconductor release repositories so that
-# r-bioc- packages receive correct casing in name_display. CRAN names take
-# precedence on a lowercase collision because deduplication runs on the
-# repo-ordered vector (CRAN listed first) before any sorting, so the CRAN
-# spelling is always kept.
-build_name_map <- function(
-    cran_repo = "https://cloud.r-project.org",
-    bioc_repos = c(
-      "https://bioconductor.org/packages/release/bioc",
-      "https://bioconductor.org/packages/release/data/annotation",
-      "https://bioconductor.org/packages/release/data/experiment",
-      "https://bioconductor.org/packages/release/workflows")) {
-  canon <- tryCatch(
-    rownames(available.packages(repos = c(cran_repo, bioc_repos))),
-    error = function(e) character(0))
-  .make_name_map(canon)
+# Build the lowercased-token -> canonical-name and -> identity-state maps from
+# the org identity ledger. Replaces the former live available.packages()/VIEWS
+# fetch: the ledger is append-only (covers archived packages the live index has
+# dropped) and size-gated upstream. Returns the maps plus the table sizes so the
+# caller can size-gate before trusting them.
+build_identity_maps <- function(cran_db_path, bioc_db_path) {
+  maps <- robservatory::load_identity(cran_db_path, bioc_db_path)
+  lk   <- maps$lookup
+  tokens <- ls(lk)
+  canon <- character(length(tokens)); state <- character(length(tokens))
+  for (i in seq_along(tokens)) {
+    r <- get(tokens[i], envir = lk)
+    canon[i] <- r$canonical_name
+    state[i] <- r$identity_state
+  }
+  list(
+    name_map  = stats::setNames(canon, tokens),
+    state_map = stats::setNames(state, tokens),
+    n_cran    = maps$n_cran,
+    n_bioc    = maps$n_bioc)
 }
 
 default_io <- function() {
