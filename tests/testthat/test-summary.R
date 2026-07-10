@@ -12,6 +12,14 @@ mk_daily <- function() {
   con
 }
 
+test_that("config exposes identity-asset settings and the identity_state column", {
+  expect_true("identity_state" %in% SUMMARY_COLS)
+  expect_identical(SUMMARY_COLS[length(SUMMARY_COLS)], "identity_state")
+  expect_equal(CRAN_ARCHIVE_REPO, "r-observatory/cran-archive")
+  expect_equal(BIOC_META_REPO, "r-observatory/bioconductor-metadata")
+  expect_equal(CRAN_NAMES_FLOOR, 15000L)
+})
+
 test_that("summary anchors windows to the anchor date and computes trend", {
   con <- mk_daily(); on.exit(DBI::dbDisconnect(con))
   s <- DBI::dbGetQuery(con, summary_sql("2026-05-30"))

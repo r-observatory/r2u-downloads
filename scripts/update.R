@@ -38,11 +38,17 @@ if (!exists("clean_aggregate_sql", mode = "function")) {
 
 SOURCE_REPO   <- "eddelbuettel/r2u-logs"
 PUBLISH_REPO  <- "r-observatory/r2u-downloads"
+CRAN_ARCHIVE_REPO <- "r-observatory/cran-archive"
+CRAN_ARCHIVE_DB   <- "cran-archive.db"
+BIOC_META_REPO    <- "r-observatory/bioconductor-metadata"
+BIOC_META_DB      <- "bioconductor-metadata.db"
+CRAN_NAMES_FLOOR  <- 15000L
+BIOC_NAMES_FLOOR  <- 1500L
 RECENT_WINDOW <- 400L
 SUMMARY_COLS  <- c("package", "name_display", "repo",
                    "total_30d", "total_90d", "total_365d",
                    "rank_30d", "rank_90d", "rank_365d",
-                   "avg_daily_30d", "trend")
+                   "avg_daily_30d", "trend", "identity_state")
 
 iso <- function(t) format(t, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
 
