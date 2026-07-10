@@ -227,7 +227,8 @@ export_summary_shard <- function(path, summary) {
       rank_90d      INTEGER,
       rank_365d     INTEGER,
       avg_daily_30d REAL,
-      trend         REAL)")
+      trend         REAL,
+      identity_state TEXT)")
 
   if (nrow(summary) > 0) {
     DBI::dbWriteTable(con, "r2u_downloads_summary", summary, append = TRUE)
@@ -307,6 +308,15 @@ apply_name_display <- function(summary_df, name_map) {
   summary_df$name_display <- disp
   summary_df[c("package", "name_display",
                setdiff(names(summary_df), c("package", "name_display")))]
+}
+
+#' Add the `identity_state` column (live|archived) to a summary data.frame from
+#' a `name_lower -> identity_state` map. A package absent from the ledger gets
+#' NA (honest unknown), never a fabricated state; it is NOT dropped, because r2u
+#' only builds CRAN/Bioc packages and its `repo` prefix already fixes its scope.
+apply_identity_state <- function(summary_df, state_map) {
+  summary_df$identity_state <- unname(state_map[summary_df$package])
+  summary_df
 }
 
 # ---------------------------------------------------------------------------

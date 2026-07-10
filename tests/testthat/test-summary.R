@@ -12,6 +12,15 @@ mk_daily <- function() {
   con
 }
 
+test_that("config exposes identity-asset settings and the identity_state column", {
+  expect_true("identity_state" %in% SUMMARY_COLS)
+  expect_identical(SUMMARY_COLS[length(SUMMARY_COLS)], "identity_state")
+  expect_equal(CRAN_ARCHIVE_REPO, "r-observatory/cran-archive")
+  expect_equal(BIOC_META_REPO, "r-observatory/bioconductor-metadata")
+  expect_equal(CRAN_NAMES_FLOOR, 15000L)
+  expect_equal(BIOC_NAMES_FLOOR, 1500L)
+})
+
 test_that("summary anchors windows to the anchor date and computes trend", {
   con <- mk_daily(); on.exit(DBI::dbDisconnect(con))
   s <- DBI::dbGetQuery(con, summary_sql("2026-05-30"))
@@ -66,4 +75,15 @@ test_that("apply_name_display uses Bioconductor canonical casing from the map", 
   nm <- c(biocgenerics = "BiocGenerics", dplyr = "dplyr")
   out <- apply_name_display(df, nm)
   expect_equal(out$name_display[out$package == "biocgenerics"], "BiocGenerics")
+})
+
+test_that("apply_identity_state sets state from the ledger and NA when absent", {
+  sm <- data.frame(package = c("mass", "deseq2", "ghostpkg"),
+                   name_display = c("MASS", "DESeq2", "ghostpkg"),
+                   repo = c("cran", "bioc", "cran"),
+                   stringsAsFactors = FALSE)
+  state_map <- c(mass = "live", deseq2 = "live")   # ghostpkg absent from the ledger
+  out <- apply_identity_state(sm, state_map)
+  expect_equal(out$identity_state, c("live", "live", NA_character_))
+  expect_identical(names(out)[ncol(out)], "identity_state")
 })

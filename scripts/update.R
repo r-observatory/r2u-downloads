@@ -38,11 +38,17 @@ if (!exists("clean_aggregate_sql", mode = "function")) {
 
 SOURCE_REPO   <- "eddelbuettel/r2u-logs"
 PUBLISH_REPO  <- "r-observatory/r2u-downloads"
+CRAN_ARCHIVE_REPO <- "r-observatory/cran-archive"
+CRAN_ARCHIVE_DB   <- "cran-archive.db"
+BIOC_META_REPO    <- "r-observatory/bioconductor-metadata"
+BIOC_META_DB      <- "bioconductor-metadata.db"
+CRAN_NAMES_FLOOR  <- 15000L
+BIOC_NAMES_FLOOR  <- 1500L
 RECENT_WINDOW <- 400L
 SUMMARY_COLS  <- c("package", "name_display", "repo",
                    "total_30d", "total_90d", "total_365d",
                    "rank_30d", "rank_90d", "rank_365d",
-                   "avg_daily_30d", "trend")
+                   "avg_daily_30d", "trend", "identity_state")
 
 iso <- function(t) format(t, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
 
@@ -104,7 +110,7 @@ embed_summary <- function(recent_path, summary_df) {
     package TEXT PRIMARY KEY, name_display TEXT, repo TEXT,
     total_30d INTEGER, total_90d INTEGER, total_365d INTEGER,
     rank_30d INTEGER, rank_90d INTEGER, rank_365d INTEGER,
-    avg_daily_30d REAL, trend REAL)")
+    avg_daily_30d REAL, trend REAL, identity_state TEXT)")
   if (nrow(summary_df) > 0) {
     DBI::dbWriteTable(con, "r2u_downloads_summary", summary_df, append = TRUE)
   }
@@ -122,11 +128,15 @@ embed_summary <- function(recent_path, summary_df) {
 #'   contents() -> named list path -> list(sha, size)  (current source files)
 #'   head_sha() -> character(1)
 #'   fetch_sources(paths, dir) -> named character (source path -> local file)
-#'   name_map() -> named character (lowercased token -> canonical)
+#'   identity_dbs() -> list(cran = path, bioc = path) (org identity ledger assets)
 #'   now() -> POSIXct
 #' @param out_dir directory to write shards + manifest into
+#' @param live_floor minimum acceptable size of the CRAN identity table before
+#'   the ledger is trusted (else this run degrades honestly, see below)
+#' @param bioc_floor minimum acceptable size of the Bioc identity table
 #' @return list(changed_shards, manifest)
-run_update <- function(io, out_dir, force_full = FALSE) {
+run_update <- function(io, out_dir, force_full = FALSE,
+                        live_floor = CRAN_NAMES_FLOOR, bioc_floor = BIOC_NAMES_FLOOR) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   manifest_path <- file.path(out_dir, "manifest.json")
 
@@ -251,8 +261,31 @@ run_update <- function(io, out_dir, force_full = FALSE) {
     export_shard(recent_path, recent_rows)
 
     summary_df <- DBI::dbGetQuery(con_work, summary_sql(format(anchor)))
-    summary_df <- apply_name_display(summary_df, io$name_map())
-    summary_df <- summary_df[SUMMARY_COLS]
+
+    # Enrich from the org identity ledger (size-gated release asset). ENRICH
+    # ONLY: never drops a row. On a download error or a failed size gate,
+    # degrade honestly for this run rather than fabricate a state -- r2u only
+    # downloads year shards (no cheap prior summary to fall back to), and the
+    # ledger is highly-available + republished every run, so a transient
+    # outage self-heals next cycle.
+    enriched <- tryCatch({
+      dbs  <- io$identity_dbs()
+      maps <- build_identity_maps(dbs$cran, dbs$bioc)
+      if (!robservatory::check_size(maps$n_cran, floor = live_floor) ||
+          !robservatory::check_size(maps$n_bioc, floor = bioc_floor)) {
+        stop("identity size gate failed (cran=", maps$n_cran, ", bioc=", maps$n_bioc, ")")
+      }
+      s <- apply_name_display(summary_df, maps$name_map)
+      apply_identity_state(s, maps$state_map)
+    }, error = function(e) {
+      message("identity ledger unavailable (", conditionMessage(e),
+              "); publishing this run with token name_display and NA identity_state")
+      s <- apply_name_display(summary_df, stats::setNames(character(0), character(0)))  # empty map -> name_display = token
+      s$identity_state <- NA_character_
+      s
+    })
+    summary_df <- enriched
+    summary_df <- summary_df[SUMMARY_COLS]   # existing select; identity_state now present
     export_summary_shard(file.path(out_dir, "r2u-summary.db"), summary_df)
     embed_summary(recent_path, summary_df)
 
@@ -305,31 +338,26 @@ gh_capture <- function(args) {
   out
 }
 
-# Build a lowercased-token -> canonical-name map from a character vector.
-# The first occurrence per lowercased token wins, so pass the vector in
-# repo-priority order (CRAN first) to get CRAN spellings on collision.
-.make_name_map <- function(canon) {
-  canon <- canon[!duplicated(tolower(canon))]
-  stats::setNames(canon, tolower(canon))
-}
-
-# Best-effort canonical-case map (lowercased token -> canonical).
-# Fetches CRAN and the four Bioconductor release repositories so that
-# r-bioc- packages receive correct casing in name_display. CRAN names take
-# precedence on a lowercase collision because deduplication runs on the
-# repo-ordered vector (CRAN listed first) before any sorting, so the CRAN
-# spelling is always kept.
-build_name_map <- function(
-    cran_repo = "https://cloud.r-project.org",
-    bioc_repos = c(
-      "https://bioconductor.org/packages/release/bioc",
-      "https://bioconductor.org/packages/release/data/annotation",
-      "https://bioconductor.org/packages/release/data/experiment",
-      "https://bioconductor.org/packages/release/workflows")) {
-  canon <- tryCatch(
-    rownames(available.packages(repos = c(cran_repo, bioc_repos))),
-    error = function(e) character(0))
-  .make_name_map(canon)
+# Build the lowercased-token -> canonical-name and -> identity-state maps from
+# the org identity ledger. Replaces the former live available.packages()/VIEWS
+# fetch: the ledger is append-only (covers archived packages the live index has
+# dropped) and size-gated upstream. Returns the maps plus the table sizes so the
+# caller can size-gate before trusting them.
+build_identity_maps <- function(cran_db_path, bioc_db_path) {
+  maps <- robservatory::load_identity(cran_db_path, bioc_db_path)
+  lk   <- maps$lookup
+  tokens <- ls(lk)
+  canon <- character(length(tokens)); state <- character(length(tokens))
+  for (i in seq_along(tokens)) {
+    r <- get(tokens[i], envir = lk)
+    canon[i] <- r$canonical_name
+    state[i] <- r$identity_state
+  }
+  list(
+    name_map  = stats::setNames(canon, tokens),
+    state_map = stats::setNames(state, tokens),
+    n_cran    = maps$n_cran,
+    n_bioc    = maps$n_bioc)
 }
 
 default_io <- function() {
@@ -382,7 +410,22 @@ default_io <- function() {
         dest
       }, character(1)), paths)
     },
-    name_map = function() build_name_map(),
+    # Downloads the shared identity assets (the CRAN archive's cran_names_all
+    # and Bioconductor metadata's bioc_names_all) from each source repo's
+    # `current` release into a temp dir, for robservatory::load_identity.
+    identity_dbs = function() {
+      tmp <- tempfile(); dir.create(tmp, showWarnings = FALSE)
+      dl <- function(repo, db) {
+        st <- suppressWarnings(system2("gh",
+          c("release", "download", "current", "--repo", repo,
+            "--pattern", db, "--dir", tmp, "--clobber"), stdout = FALSE, stderr = FALSE))
+        p <- file.path(tmp, db)
+        if (!identical(as.integer(st), 0L) || !file.exists(p)) stop("identity asset unreachable: ", repo, "/", db)
+        p
+      }
+      list(cran = dl(CRAN_ARCHIVE_REPO, CRAN_ARCHIVE_DB),
+           bioc = dl(BIOC_META_REPO, BIOC_META_DB))
+    },
     now = function() Sys.time()
   )
 }

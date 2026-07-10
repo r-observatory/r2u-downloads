@@ -44,6 +44,7 @@ jobs:
             any::DBI
             any::duckdb
             any::withr
+            github::r-observatory/robservatory@v0.1.0
 
       - name: Run unit tests
         run: Rscript tests/testthat.R

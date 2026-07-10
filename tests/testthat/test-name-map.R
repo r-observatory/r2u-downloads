@@ -1,19 +1,19 @@
-test_that(".make_name_map: CRAN spelling wins on case-only collision", {
-  # Simulate repo-ordered input: CRAN packages first, then Bioc.
-  # "ZOO" comes from CRAN, "zoo" from Bioc. The first occurrence per lowercased
-  # token must win, so the map entry for "zoo" must carry the CRAN spelling "ZOO".
-  m <- .make_name_map(c("ZOO", "zoo"))
-  expect_equal(m[["zoo"]], "ZOO")
-})
+test_that("build_identity_maps reads canonical names and states from the ledger", {
+  d <- withr::local_tempdir()
+  cran_db <- file.path(d, "cran-archive.db"); bioc_db <- file.path(d, "bioc-meta.db")
+  wc <- DBI::dbConnect(RSQLite::SQLite(), cran_db)
+  DBI::dbExecute(wc, "CREATE TABLE cran_names_all (name_lower TEXT PRIMARY KEY, canonical_name TEXT, identity_state TEXT, first_seen TEXT, last_seen TEXT)")
+  DBI::dbExecute(wc, "INSERT INTO cran_names_all VALUES ('mass','MASS','live','x','y'),('oldpkg','OldPkg','archived','x','y')")
+  DBI::dbDisconnect(wc)
+  wb <- DBI::dbConnect(RSQLite::SQLite(), bioc_db)
+  DBI::dbExecute(wb, "CREATE TABLE bioc_names_all (name_lower TEXT PRIMARY KEY, canonical_name TEXT, identity_state TEXT, first_seen TEXT, last_seen TEXT)")
+  DBI::dbExecute(wb, "INSERT INTO bioc_names_all VALUES ('deseq2','DESeq2','live','x','y')")
+  DBI::dbDisconnect(wb)
 
-test_that(".make_name_map: returns named vector with lowercased keys", {
-  m <- .make_name_map(c("dplyr", "BiocGenerics"))
-  expect_named(m, c("dplyr", "biocgenerics"), ignore.order = FALSE)
-  expect_equal(unname(m), c("dplyr", "BiocGenerics"))
-})
-
-test_that(".make_name_map: empty input returns empty named character", {
-  m <- .make_name_map(character(0))
-  expect_length(m, 0)
-  expect_type(m, "character")
+  m <- build_identity_maps(cran_db, bioc_db)
+  expect_equal(unname(m$name_map[["mass"]]), "MASS")
+  expect_equal(unname(m$name_map[["deseq2"]]), "DESeq2")
+  expect_equal(unname(m$state_map[["oldpkg"]]), "archived")
+  expect_equal(unname(m$state_map[["deseq2"]]), "live")
+  expect_gte(m$n_cran, 2L); expect_gte(m$n_bioc, 1L)
 })
