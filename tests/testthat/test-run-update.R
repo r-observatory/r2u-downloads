@@ -15,10 +15,10 @@ test_that("cold-start run_update builds year shards, recent, summary, manifest",
     head_sha         = function() "deadbeef",
     fetch_sources    = function(paths, dir)
       stats::setNames(vapply(paths, function(p) fixture_path(p), character(1)), paths),
-    name_map         = function() c("dplyr" = "dplyr", "biocgenerics" = "BiocGenerics"),
+    identity_dbs     = function() make_identity_dbs(cran = "dplyr", bioc = "BiocGenerics"),
     now              = function() as.POSIXct("2026-06-01 06:00:00", tz = "UTC"))
 
-  res <- run_update(io, out)
+  res <- run_update(io, out, live_floor = 1L, bioc_floor = 1L)
 
   for (f in c("r2u-2026.db", "r2u-2025.db", "r2u-recent.db", "r2u-summary.db", "manifest.json")) {
     expect_true(file.exists(file.path(out, f)), info = f)
@@ -38,11 +38,12 @@ test_that("cold-start run_update builds year shards, recent, summary, manifest",
   expect_equal(
     DBI::dbGetQuery(c25, "SELECT COUNT(*) n FROM r2u_downloads_daily WHERE date='2025-12-31'")$n, 1L)
 
-  # canonical name_display flows into the summary
+  # canonical name_display + identity_state flow into the summary
   cs <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "r2u-summary.db"))
   on.exit(DBI::dbDisconnect(cs), add = TRUE)
-  disp <- DBI::dbGetQuery(cs, "SELECT name_display FROM r2u_downloads_summary WHERE package='biocgenerics'")$name_display
-  expect_equal(disp, "BiocGenerics")
+  bg <- DBI::dbGetQuery(cs, "SELECT name_display, identity_state FROM r2u_downloads_summary WHERE package='biocgenerics'")
+  expect_equal(bg$name_display, "BiocGenerics")
+  expect_equal(bg$identity_state, "live")
 
   man <- jsonlite::fromJSON(file.path(out, "manifest.json"), simplifyVector = FALSE)
   expect_true("r2u-2026.db" %in% unlist(man$changed_shards))
@@ -63,7 +64,7 @@ test_that("heartbeat run (no source change) writes manifest only", {
     contents         = function() list("r2u/x.csv.zst" = list(sha = "1")),  # unchanged
     head_sha         = function() "same",
     fetch_sources    = function(paths, dir) stop("must not fetch on a heartbeat"),
-    name_map         = function() character(0),
+    identity_dbs     = function() stop("must not resolve identity on a heartbeat"),
     now              = function() as.POSIXct("2026-06-02 06:00:00", tz = "UTC"))
 
   res <- run_update(io, out)
@@ -103,7 +104,7 @@ test_that("a failed window-year shard download aborts (never publishes truncated
     head_sha         = function() "x",
     fetch_sources    = function(paths, dir)
       stats::setNames(vapply(paths, function(p) fixture_path(p), character(1)), paths),
-    name_map         = function() character(0),
+    identity_dbs     = function() stop("must not resolve identity when the window-year download aborts first"),
     now              = function() as.POSIXct("2026-06-01 06:00:00", tz = "UTC"))
 
   # 2025 is a window year that prior state says exists, but its download fails:
@@ -134,10 +135,10 @@ test_that("force_full = TRUE forces a full rebuild even when upstream is unchang
     head_sha         = function() "deadbeef",
     fetch_sources    = function(paths, dir)
       stats::setNames(vapply(paths, function(p) fixture_path(p), character(1)), paths),
-    name_map         = function() c("dplyr" = "dplyr"),
+    identity_dbs     = function() make_identity_dbs(cran = "dplyr"),
     now              = function() as.POSIXct("2026-06-01 06:00:00", tz = "UTC"))
 
-  res <- run_update(io, out, force_full = TRUE)
+  res <- run_update(io, out, force_full = TRUE, live_floor = 1L, bioc_floor = 0L)
 
   expect_gt(length(res$changed_shards), 0)
   expect_true("r2u-2026.db" %in% res$changed_shards)
@@ -166,7 +167,7 @@ test_that("a fully-deleted upstream year publishes an empty shard, leaving recen
     contents         = function() curr,
     head_sha         = function() "x",
     fetch_sources    = function(paths, dir) stop("no sources to fetch for a deleted year"),
-    name_map         = function() character(0),
+    identity_dbs     = function() stop("must not resolve identity when no window-year changed"),
     now              = function() as.POSIXct("2026-06-01 06:00:00", tz = "UTC"))
 
   res <- run_update(io, out)
@@ -175,4 +176,115 @@ test_that("a fully-deleted upstream year publishes an empty shard, leaving recen
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   expect_equal(DBI::dbGetQuery(con, "SELECT COUNT(*) n FROM r2u_downloads_daily")$n, 0L)
   expect_equal(res$changed_shards, "r2u-2023.db")          # 2023 out of window -> recent/summary untouched
+})
+
+test_that("run_update enriches from the identity ledger without dropping any row", {
+  skip_if_not_installed("duckdb")
+  out <- withr::local_tempdir()
+
+  curr <- list(
+    "r2u/r2u_r2u-2026-01.csv.zst" = list(sha = "a", size = 1),
+    "rob/r2u_rob-2026-01.csv.zst" = list(sha = "b", size = 1),
+    "r2u/r2u_r2u-2025-12.csv.zst" = list(sha = "c", size = 1),
+    "rob/r2u_rob-2025-12.csv.zst" = list(sha = "d", size = 1))
+
+  # The bioc ledger fixture is deliberately left empty, so "biocgenerics" (a
+  # real package the source data produces) stands in for a token absent from
+  # the ledger, while "dplyr" is present and gets fully resolved.
+  io <- list(
+    release_exists   = function() FALSE,
+    release_download = function(pattern, dir) 1L,
+    contents         = function() curr,
+    head_sha         = function() "deadbeef",
+    fetch_sources    = function(paths, dir)
+      stats::setNames(vapply(paths, function(p) fixture_path(p), character(1)), paths),
+    identity_dbs     = function() make_identity_dbs(cran = "dplyr"),
+    now              = function() as.POSIXct("2026-06-01 06:00:00", tz = "UTC"))
+
+  res <- run_update(io, out, live_floor = 1L, bioc_floor = 0L)
+
+  cs <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "r2u-summary.db"))
+  on.exit(DBI::dbDisconnect(cs), add = TRUE)
+  summ <- DBI::dbGetQuery(cs,
+    "SELECT package, name_display, repo, identity_state FROM r2u_downloads_summary ORDER BY package")
+
+  # Nothing dropped: every package the source data produced is still published.
+  expect_setequal(summ$package, c("dplyr", "biocgenerics"))
+
+  ghost <- summ[summ$package == "biocgenerics", ]
+  expect_equal(ghost$name_display, "biocgenerics")   # token fallback: absent from the ledger
+  expect_true(is.na(ghost$identity_state))           # honest unknown, never fabricated
+  expect_equal(ghost$repo, "bioc")                   # repo untouched by the enrich step
+
+  known <- summ[summ$package == "dplyr", ]
+  expect_equal(known$name_display, "dplyr")
+  expect_equal(known$identity_state, "live")
+  expect_equal(known$repo, "cran")
+})
+
+test_that("run_update degrades honestly when the identity ledger is unreachable", {
+  skip_if_not_installed("duckdb")
+  out <- withr::local_tempdir()
+
+  curr <- list(
+    "r2u/r2u_r2u-2026-01.csv.zst" = list(sha = "a", size = 1),
+    "rob/r2u_rob-2026-01.csv.zst" = list(sha = "b", size = 1),
+    "r2u/r2u_r2u-2025-12.csv.zst" = list(sha = "c", size = 1),
+    "rob/r2u_rob-2025-12.csv.zst" = list(sha = "d", size = 1))
+
+  io <- list(
+    release_exists   = function() FALSE,
+    release_download = function(pattern, dir) 1L,
+    contents         = function() curr,
+    head_sha         = function() "deadbeef",
+    fetch_sources    = function(paths, dir)
+      stats::setNames(vapply(paths, function(p) fixture_path(p), character(1)), paths),
+    identity_dbs     = function() stop("identity assets unreachable"),
+    now              = function() as.POSIXct("2026-06-01 06:00:00", tz = "UTC"))
+
+  # The run must still succeed (never abort just because the ledger is down).
+  res <- run_update(io, out, live_floor = 1L, bioc_floor = 1L)
+  expect_true(file.exists(file.path(out, "r2u-summary.db")))
+
+  cs <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "r2u-summary.db"))
+  on.exit(DBI::dbDisconnect(cs), add = TRUE)
+  summ <- DBI::dbGetQuery(cs, "SELECT package, name_display, identity_state FROM r2u_downloads_summary")
+
+  expect_setequal(summ$package, c("dplyr", "biocgenerics"))
+  expect_equal(summ$name_display, summ$package)   # token fallback for every row
+  expect_true(all(is.na(summ$identity_state)))    # honest unknown, never fabricated
+})
+
+test_that("run_update degrades honestly when the identity size gate fails", {
+  skip_if_not_installed("duckdb")
+  out <- withr::local_tempdir()
+
+  curr <- list(
+    "r2u/r2u_r2u-2026-01.csv.zst" = list(sha = "a", size = 1),
+    "rob/r2u_rob-2026-01.csv.zst" = list(sha = "b", size = 1),
+    "r2u/r2u_r2u-2025-12.csv.zst" = list(sha = "c", size = 1),
+    "rob/r2u_rob-2025-12.csv.zst" = list(sha = "d", size = 1))
+
+  # Ledger fixtures are present and valid, but live_floor is set absurdly high
+  # so check_size() rejects them -> same degrade path as an unreachable ledger.
+  io <- list(
+    release_exists   = function() FALSE,
+    release_download = function(pattern, dir) 1L,
+    contents         = function() curr,
+    head_sha         = function() "deadbeef",
+    fetch_sources    = function(paths, dir)
+      stats::setNames(vapply(paths, function(p) fixture_path(p), character(1)), paths),
+    identity_dbs     = function() make_identity_dbs(cran = "dplyr", bioc = "BiocGenerics"),
+    now              = function() as.POSIXct("2026-06-01 06:00:00", tz = "UTC"))
+
+  res <- run_update(io, out, live_floor = 999999L, bioc_floor = 1L)
+  expect_true(file.exists(file.path(out, "r2u-summary.db")))
+
+  cs <- DBI::dbConnect(RSQLite::SQLite(), file.path(out, "r2u-summary.db"))
+  on.exit(DBI::dbDisconnect(cs), add = TRUE)
+  summ <- DBI::dbGetQuery(cs, "SELECT package, name_display, identity_state FROM r2u_downloads_summary")
+
+  expect_setequal(summ$package, c("dplyr", "biocgenerics"))
+  expect_equal(summ$name_display, summ$package)   # token fallback for every row
+  expect_true(all(is.na(summ$identity_state)))    # honest unknown, never fabricated
 })

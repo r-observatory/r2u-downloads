@@ -227,7 +227,8 @@ export_summary_shard <- function(path, summary) {
       rank_90d      INTEGER,
       rank_365d     INTEGER,
       avg_daily_30d REAL,
-      trend         REAL)")
+      trend         REAL,
+      identity_state TEXT)")
 
   if (nrow(summary) > 0) {
     DBI::dbWriteTable(con, "r2u_downloads_summary", summary, append = TRUE)
