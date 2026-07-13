@@ -227,3 +227,7 @@ please credit the upstream r2u project when using these numbers.
 The pipeline code in this repository is proprietary. Copyright (c) 2026 HJJB, LLC. All rights reserved; see [LICENSE](LICENSE). The underlying download data originates from the r2u
 service and its logs; please respect the upstream project's terms when
 redistributing.
+
+## Feedback
+
+Found a bug, a wrong number, or a missing package? Report it at [r-observatory/feedback](https://github.com/r-observatory/feedback/issues/new/choose). All feedback about R Observatory, the site, the data, and the pipelines, is tracked in one place.
