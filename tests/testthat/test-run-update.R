@@ -148,6 +148,17 @@ test_that("cold-start run_update builds year shards, recent, summary, manifest",
   expect_true("r2u-2026.db" %in% unlist(man$changed_shards))
   expect_true("r2u-recent.db" %in% unlist(man$changed_shards))
   expect_equal(man$upstream_head_sha, "deadbeef")
+
+  # Integrity/completeness core describes the freshly-built r2u-summary.db.
+  sdb <- file.path(out, "r2u-summary.db")
+  expect_equal(man$db_filename, "r2u-summary.db")
+  expect_equal(as.integer(man$db_bytes), as.integer(file.size(sdb)))
+  expect_equal(man$db_sha256, file_sha256(sdb))
+  expect_match(man$db_sha256, "^[0-9a-f]{64}$")
+  expect_true(man$complete)
+  expect_equal(
+    as.integer(man$tables$r2u_downloads_summary),
+    DBI::dbGetQuery(cs, "SELECT count(*) n FROM r2u_downloads_summary")$n)
 })
 
 test_that("heartbeat run (no source change) writes manifest only", {
@@ -255,7 +266,11 @@ test_that("a fully-deleted upstream year publishes an empty shard, leaving recen
     shards = list(
       "r2u-2023.db" = list(rows = 1, date_min = "2023-01-01", date_max = "2023-12-31"),
       "r2u-2026.db" = list(rows = 5, date_min = "2026-01-01", date_max = "2026-05-31")),
-    last_changed = "2026-05-01T00:00:00Z")
+    last_changed = "2026-05-01T00:00:00Z",
+    # a prior run's integrity core describing the still-current r2u-summary.db
+    db_filename = "r2u-summary.db", db_bytes = 4321L,
+    db_sha256 = paste(rep("a", 64), collapse = ""),
+    tables = list(r2u_downloads_summary = 5L), complete = TRUE)
   writeLines(jsonlite::toJSON(prev, auto_unbox = TRUE), file.path(out, "manifest.json"))
 
   curr <- list("r2u/r2u_r2u-2026-01.csv.zst" = list(sha = "a"))  # 2023 gone, 2026 unchanged
@@ -275,6 +290,15 @@ test_that("a fully-deleted upstream year publishes an empty shard, leaving recen
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   expect_equal(DBI::dbGetQuery(con, "SELECT COUNT(*) n FROM r2u_downloads_daily")$n, 0L)
   expect_equal(res$changed_shards, "r2u-2023.db")          # 2023 out of window -> recent/summary untouched
+
+  # r2u-summary.db was NOT rebuilt this run, so its integrity core is carried
+  # forward from the prior manifest (the fresh `out` would otherwise drop it).
+  man <- jsonlite::fromJSON(file.path(out, "manifest.json"), simplifyVector = FALSE)
+  expect_false("r2u-summary.db" %in% unlist(man$changed_shards))
+  expect_equal(man$db_sha256, paste(rep("a", 64), collapse = ""))
+  expect_equal(as.integer(man$db_bytes), 4321L)
+  expect_equal(as.integer(man$tables$r2u_downloads_summary), 5L)
+  expect_true(man$complete)
 })
 
 test_that("run_update enriches from the identity ledger without dropping any row", {

@@ -220,13 +220,19 @@ run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
     recent_rows <- extract_recent_rows(con_work, anchor, RECENT_WINDOW)
     recent_path <- file.path(out_dir, "r2u-recent.db")
     export_shard(recent_path, recent_rows)
-    export_summary_shard(file.path(out_dir, "r2u-summary.db"), summary_df)
+    summary_out <- file.path(out_dir, "r2u-summary.db")
+    export_summary_shard(summary_out, summary_df)
     embed_summary(recent_path, summary_df)
 
     # FORCE exactly the recent + summary shards: no year shard is rewritten,
     # since the raw daily history was never re-fetched.
     changed_shards <- c("r2u-recent.db", "r2u-summary.db")
     shard_updates  <- list("r2u-recent.db" = coverage(recent_rows))
+
+    # Integrity/completeness core over the finalized summary asset. The summary
+    # is a full rebuild over the window shards loaded from the release, whose
+    # 400-day span fully covers every 365-day summary window, so complete = TRUE.
+    core <- summary_integrity_core(summary_out, complete = TRUE)
 
     out <- prev
     out$tag            <- sprintf("v%s", format(now, "%Y%m%d-%H%M%S", tz = "UTC"))
@@ -236,7 +242,7 @@ run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
     out$changed_shards <- as.list(changed_shards)
     out$shards         <- merge_shard_coverage(prev_shards, shard_updates)
     out$summary        <- list(affected_years = list(), source_rows_read = 0L)
-    write_manifest(manifest_path, out)
+    write_manifest(manifest_path, out, core = core)
     write_release_notes(file.path(out_dir, "release_notes.md"), out)
     return(list(changed_shards = changed_shards, manifest = out))
   }
@@ -408,7 +414,22 @@ run_update <- function(io, out_dir, force_full = FALSE, reclassify_only = FALSE,
     summary           = list(affected_years = as.list(ay),
                              source_rows_read = source_rows_read)
   )
-  write_manifest(manifest_path, out)
+
+  # Integrity/completeness core describing the published r2u-summary.db. When the
+  # summary was rebuilt this run (a changed year fell inside the rolling window),
+  # hash the freshly-finalized file on disk; when it was not, carry the prior core
+  # forward so the manifest keeps describing the unchanged published asset instead
+  # of dropping it (`out` is built fresh here, so it does not inherit prev's core).
+  # complete = TRUE: the summary is a full rebuild whose 400-day working window
+  # fully covers every 365-day summary window (see the reclassify branch note).
+  summary_out <- file.path(out_dir, "r2u-summary.db")
+  core <- if ("r2u-summary.db" %in% changed_shards && file.exists(summary_out)) {
+    summary_integrity_core(summary_out, complete = TRUE)
+  } else {
+    prev_integrity_core(prev)
+  }
+
+  write_manifest(manifest_path, out, core = core)
   write_release_notes(file.path(out_dir, "release_notes.md"), out)
   list(changed_shards = changed_shards, manifest = out)
 }
