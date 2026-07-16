@@ -331,8 +331,110 @@ merge_shard_coverage <- function(prev, updates) {
   out
 }
 
+#' Compute the lowercase hex SHA-256 of a file's exact on-disk bytes.
+#'
+#' Uses whatever the runner already provides, in preference order:
+#'   1. digest  package        (if installed)
+#'   2. openssl package        (if installed)
+#'   3. sha256sum (coreutils)  - present on the ubuntu-latest CI runner
+#'   4. shasum -a 256 (BSD)    - macOS/local fallback
+#' No heavy dependency is declared: on CI (which installs only RSQLite,
+#' jsonlite, testthat, DBI) the coreutils `sha256sum` path is used. If a
+#' sibling pipeline already declares `digest`, that path wins automatically.
+file_sha256 <- function(path) {
+  if (requireNamespace("digest", quietly = TRUE)) {
+    return(tolower(digest::digest(file = path, algo = "sha256")))
+  }
+  if (requireNamespace("openssl", quietly = TRUE)) {
+    con <- file(path, open = "rb")
+    on.exit(close(con), add = TRUE)
+    return(tolower(as.character(openssl::sha256(con))))
+  }
+  sha_tool <- Sys.which("sha256sum")
+  if (nzchar(sha_tool)) {
+    out <- system2(sha_tool, shQuote(path), stdout = TRUE)
+    return(tolower(sub("\\s.*$", "", out[1])))
+  }
+  shasum_tool <- Sys.which("shasum")
+  if (nzchar(shasum_tool)) {
+    out <- system2(shasum_tool, c("-a", "256", shQuote(path)), stdout = TRUE)
+    return(tolower(sub("\\s.*$", "", out[1])))
+  }
+  stop("No SHA-256 backend found (need one of: digest, openssl, sha256sum, shasum)")
+}
+
+#' Build the integrity / completeness core describing a finalized SQLite file.
+#'
+#' Returns a named list of TOP-LEVEL manifest fields computed from the exact
+#' on-disk bytes of `db_path` (call this only after the file is finalized):
+#'   * db_filename - basename of the file
+#'   * db_bytes    - byte size of the file as a double. Deliberately NOT cast
+#'                   to integer: R's integer range is 32-bit and overflows to
+#'                   NA (serialized as the string "NA") for files >= ~2 GiB.
+#'   * db_sha256   - lowercase hex sha256 of the file's exact bytes
+#'   * tables      - named list mapping each user table to its row count
+#'   * complete    - passed through by the caller. complete = the DB holds the
+#'                   full, non-partial dataset (a full rebuild each run);
+#'                   freshness is tracked separately via generated_at and the
+#'                   fingerprint. A pipeline with a genuine partial/bootstrap
+#'                   state would derive this instead of hardcoding it.
+#' Lets a downstream merge content-verify the asset it pulls and confirm the
+#' expected tables/rows are present.
+summary_integrity_core <- function(db_path, complete = TRUE) {
+  stopifnot(file.exists(db_path))
+
+  con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
+  tables <- tryCatch({
+    tbl_names <- DBI::dbGetQuery(con, "
+      SELECT name FROM sqlite_master
+       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+       ORDER BY name")$name
+
+    stats::setNames(
+      lapply(tbl_names, function(t) {
+        DBI::dbGetQuery(con, sprintf('SELECT count(*) AS n FROM "%s"', t))$n
+      }),
+      tbl_names
+    )
+  }, finally = DBI::dbDisconnect(con))
+
+  # db_bytes/db_sha256 read the raw on-disk file only after the connection
+  # above is closed, so no open handle or journal file skews the hash/size.
+  list(
+    db_filename = basename(db_path),
+    db_bytes    = file.size(db_path),
+    db_sha256   = file_sha256(db_path),
+    tables      = tables,
+    complete    = complete
+  )
+}
+
+#' Extract the integrity-core fields (db_filename, db_bytes, db_sha256, tables,
+#' complete) from a PRIOR manifest object, or NULL if it carries none.
+#'
+#' Used to carry the core forward on a run that does NOT rebuild r2u-summary.db
+#' (a changed year that falls outside the rolling window leaves the published
+#' summary asset untouched), so the manifest keeps correctly describing the
+#' still-current file instead of dropping its hash/size/tables.
+prev_integrity_core <- function(prev) {
+  keys <- c("db_filename", "db_bytes", "db_sha256", "tables", "complete")
+  if (is.null(prev) || !all(keys %in% names(prev))) return(NULL)
+  prev[keys]
+}
+
 #' Write the manifest object as pretty JSON, preserving nulls and empty arrays.
-write_manifest <- function(path, obj) {
+#'
+#' `core` (optional) is a named list of TOP-LEVEL fields to merge into the
+#' manifest - used to attach the integrity/completeness core built by
+#' summary_integrity_core() (db_filename, db_bytes, db_sha256, tables, complete).
+#' Any stale copies of those keys already on `obj` are dropped before the merge,
+#' since (unlike the sibling reference) this repo's `obj` may be a prev-derived
+#' full manifest that already carries them, and c() would otherwise emit
+#' duplicate JSON keys.
+write_manifest <- function(path, obj, core = NULL) {
+  if (!is.null(core)) {
+    obj <- c(obj[setdiff(names(obj), names(core))], core)  # merge as top-level fields, not nested
+  }
   writeLines(
     jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE, null = "null"),
     path)
