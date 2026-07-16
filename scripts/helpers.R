@@ -336,8 +336,8 @@ merge_shard_coverage <- function(prev, updates) {
 #' Uses whatever the runner already provides, in preference order:
 #'   1. digest  package        (if installed)
 #'   2. openssl package        (if installed)
-#'   3. sha256sum (coreutils)  — present on the ubuntu-latest CI runner
-#'   4. shasum -a 256 (BSD)    — macOS/local fallback
+#'   3. sha256sum (coreutils)  - present on the ubuntu-latest CI runner
+#'   4. shasum -a 256 (BSD)    - macOS/local fallback
 #' No heavy dependency is declared: on CI (which installs only RSQLite,
 #' jsonlite, testthat, DBI) the coreutils `sha256sum` path is used. If a
 #' sibling pipeline already declares `digest`, that path wins automatically.
@@ -367,34 +367,42 @@ file_sha256 <- function(path) {
 #'
 #' Returns a named list of TOP-LEVEL manifest fields computed from the exact
 #' on-disk bytes of `db_path` (call this only after the file is finalized):
-#'   * db_filename — basename of the file
-#'   * db_bytes    — integer byte size of the file
-#'   * db_sha256   — lowercase hex sha256 of the file's exact bytes
-#'   * tables      — named list mapping each user table to its row count
-#'   * complete    — passed through by the caller (TRUE for a full rebuild)
+#'   * db_filename - basename of the file
+#'   * db_bytes    - byte size of the file as a double. Deliberately NOT cast
+#'                   to integer: R's integer range is 32-bit and overflows to
+#'                   NA (serialized as the string "NA") for files >= ~2 GiB.
+#'   * db_sha256   - lowercase hex sha256 of the file's exact bytes
+#'   * tables      - named list mapping each user table to its row count
+#'   * complete    - passed through by the caller. complete = the DB holds the
+#'                   full, non-partial dataset (a full rebuild each run);
+#'                   freshness is tracked separately via generated_at and the
+#'                   fingerprint. A pipeline with a genuine partial/bootstrap
+#'                   state would derive this instead of hardcoding it.
 #' Lets a downstream merge content-verify the asset it pulls and confirm the
 #' expected tables/rows are present.
 summary_integrity_core <- function(db_path, complete = TRUE) {
   stopifnot(file.exists(db_path))
 
   con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
-  on.exit(DBI::dbDisconnect(con), add = TRUE)
+  tables <- tryCatch({
+    tbl_names <- DBI::dbGetQuery(con, "
+      SELECT name FROM sqlite_master
+       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+       ORDER BY name")$name
 
-  tbl_names <- DBI::dbGetQuery(con, "
-    SELECT name FROM sqlite_master
-     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-     ORDER BY name")$name
+    stats::setNames(
+      lapply(tbl_names, function(t) {
+        DBI::dbGetQuery(con, sprintf('SELECT count(*) AS n FROM "%s"', t))$n
+      }),
+      tbl_names
+    )
+  }, finally = DBI::dbDisconnect(con))
 
-  tables <- stats::setNames(
-    lapply(tbl_names, function(t) {
-      DBI::dbGetQuery(con, sprintf('SELECT count(*) AS n FROM "%s"', t))$n
-    }),
-    tbl_names
-  )
-
+  # db_bytes/db_sha256 read the raw on-disk file only after the connection
+  # above is closed, so no open handle or journal file skews the hash/size.
   list(
     db_filename = basename(db_path),
-    db_bytes    = as.integer(file.size(db_path)),
+    db_bytes    = file.size(db_path),
     db_sha256   = file_sha256(db_path),
     tables      = tables,
     complete    = complete
@@ -417,7 +425,7 @@ prev_integrity_core <- function(prev) {
 #' Write the manifest object as pretty JSON, preserving nulls and empty arrays.
 #'
 #' `core` (optional) is a named list of TOP-LEVEL fields to merge into the
-#' manifest — used to attach the integrity/completeness core built by
+#' manifest - used to attach the integrity/completeness core built by
 #' summary_integrity_core() (db_filename, db_bytes, db_sha256, tables, complete).
 #' Any stale copies of those keys already on `obj` are dropped before the merge,
 #' since (unlike the sibling reference) this repo's `obj` may be a prev-derived

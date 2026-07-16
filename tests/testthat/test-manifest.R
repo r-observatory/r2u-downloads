@@ -62,11 +62,27 @@ test_that("summary_integrity_core reports filename, bytes, sha256, tables, compl
 })
 
 test_that("summary_integrity_core sha256 matches an independent digest of the bytes", {
-  skip_if_not_installed("digest")
+  # Compute the expected hash via an external CLI tool, independent of
+  # file_sha256()'s own preferred backend (digest/openssl), so this test
+  # genuinely cross-checks the code path instead of re-running the same
+  # library. Skip only if neither tool is on PATH (both are expected on CI).
+  sha256sum_bin <- Sys.which("sha256sum")
+  shasum_bin    <- Sys.which("shasum")
+  if (!nzchar(sha256sum_bin) && !nzchar(shasum_bin)) {
+    skip("neither sha256sum nor shasum is on PATH")
+  }
+
   db <- build_summary_db(2L)
 
   core <- summary_integrity_core(db)
-  independent <- tolower(digest::digest(file = db, algo = "sha256"))
+
+  if (nzchar(sha256sum_bin)) {
+    out <- system2(sha256sum_bin, shQuote(db), stdout = TRUE)
+  } else {
+    out <- system2(shasum_bin, c("-a", "256", shQuote(db)), stdout = TRUE)
+  }
+  independent <- tolower(sub("\\s.*$", "", out[1]))
+
   expect_equal(core$db_sha256, independent)
 })
 
